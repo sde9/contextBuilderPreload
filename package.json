@@ -1,0 +1,33 @@
+{
+  "name": "enabler-context-builder-preload",
+  "version": "0.3.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.ts",
+    "smoke:preload": "tsx scripts/smoke-preload.ts",
+    "smoke:all": "tsx scripts/smoke.ts && tsx scripts/smoke-preload.ts",
+    "preload": "node scripts/run-preload.mjs"
+  },
+  "dependencies": {
+    "@types/dagre": "^0.7.54",
+    "@xyflow/react": "^12.11.0",
+    "dagre": "^0.8.5",
+    "next": "^15.3.0",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.23.8",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}

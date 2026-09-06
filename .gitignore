@@ -1,0 +1,16 @@
+node_modules/
+.next/
+out/
+
+# secrets: one API key per developer, never committed
+.env.local
+.env*.local
+
+# preload runs hold a person's documents verbatim
+.runs/
+
+*.tsbuildinfo
+next-env.d.ts
+
+.DS_Store
+_to_delete/
