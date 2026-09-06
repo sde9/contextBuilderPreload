@@ -16,12 +16,45 @@ import type { Model } from './types';
  * Chunk text is the bulky part and only stage 1 and the evidence panel need
  * it, so it lives in its own file. Opening a finished map does not load the
  * corpus.
+ *
+ * WHERE THE FILES GO
+ *
+ * Running locally, next to the project. On serverless hosting the deployment
+ * directory is read-only and /tmp is the only writable path, so that is where
+ * runs go there.
+ *
+ * That works, with one caveat worth knowing before a demo: /tmp belongs to one
+ * instance and is wiped on a cold start. A run driven step after step almost
+ * always stays on the same warm instance and completes, but a long pause in
+ * the middle can lose it. Set PRELOAD_RUN_DIR to a mounted volume, or replace
+ * the four functions below with a real store, to make that guarantee real.
  */
 
-const ROOT = process.env.PRELOAD_RUN_DIR || join(process.cwd(), '.runs');
+/** True on Vercel, and on the Lambda-style runtimes underneath it. */
+function serverless(): boolean {
+  return Boolean(
+    process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT
+  );
+}
+
+const ROOT =
+  process.env.PRELOAD_RUN_DIR || (serverless() ? '/tmp/preload-runs' : join(process.cwd(), '.runs'));
+
+/** Shown when a run cannot be found, which on serverless has a real cause. */
+export const RUN_MISSING = serverless()
+  ? 'That run is no longer on this server. Runs are kept on one instance\'s temporary disk, and it was recycled. Start the run again, or set PRELOAD_RUN_DIR to durable storage.'
+  : 'No such run.';
 
 async function ensure(): Promise<void> {
-  await mkdir(ROOT, { recursive: true });
+  try {
+    await mkdir(ROOT, { recursive: true });
+  } catch (e) {
+    // R11. A read-only disk is a deployment problem, and saying so beats
+    // "ENOENT mkdir /var/task/.runs" on a screen in front of a client.
+    throw new Error(
+      `Cannot write runs to ${ROOT}: ${(e as Error).message}. Set PRELOAD_RUN_DIR to a writable path.`
+    );
+  }
 }
 
 const modelPath = (id: string) => join(ROOT, `${id}.json`);

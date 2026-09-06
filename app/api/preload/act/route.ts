@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { loadRun, saveRun } from '@/lib/runStore';
+import { RUN_MISSING, loadRun, saveRun } from '@/lib/runStore';
 import { confirmConcept, rejectConcept } from '@/lib/reducer';
 import { resolveContest, splitConcept } from '@/lib/merge';
 import type { Model, SourceRole } from '@/lib/types';
@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   try {
     const { runId, action } = (await req.json()) as { runId: string; action: Action };
     const model = await loadRun(runId);
-    if (!model) return NextResponse.json({ error: 'No such run' }, { status: 404 });
+    if (!model) return NextResponse.json({ error: RUN_MISSING }, { status: 404 });
 
     let next: Model = model;
 

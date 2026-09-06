@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { loadRunFull, saveRun } from '@/lib/runStore';
+import { RUN_MISSING, loadRunFull, saveRun } from '@/lib/runStore';
 import { retry, step } from '@/lib/pipeline';
 
 export const runtime = 'nodejs';
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   try {
     const { runId, resume } = (await req.json()) as { runId: string; resume?: boolean };
     const loaded = await loadRunFull(runId);
-    if (!loaded) return NextResponse.json({ error: 'No such run' }, { status: 404 });
+    if (!loaded) return NextResponse.json({ error: RUN_MISSING }, { status: 404 });
 
     const started = Date.now();
     const out = await step(resume ? retry(loaded) : loaded);

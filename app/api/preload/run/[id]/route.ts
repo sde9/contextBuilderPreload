@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { loadRun } from '@/lib/runStore';
+import { RUN_MISSING, loadRun } from '@/lib/runStore';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,6 +8,6 @@ export const dynamic = 'force-dynamic';
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const model = await loadRun(id);
-  if (!model) return NextResponse.json({ error: 'No such run' }, { status: 404 });
+  if (!model) return NextResponse.json({ error: RUN_MISSING }, { status: 404 });
   return NextResponse.json({ model });
 }

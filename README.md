@@ -33,6 +33,11 @@ Check the core with no key and no network:
 npm run smoke:all     # 20 real-time assertions + 101 preload assertions
 ```
 
+Run that after touching `reducer.ts`, `merge.ts`, `cluster.ts` or `chunk.ts`. It
+drives the same code path the model output goes through, using hand-written
+patches, so a bad map tells you immediately whether the fault is in the reducer
+or in the prompt.
+
 Then check the whole pipeline against real documents. `sample-documents/` holds
 four files about the same imaginary project, and the spec and the transcript
 disagree about the cancellation window on purpose:
@@ -46,11 +51,6 @@ That drives the same routes the browser uses and prints the finished map, the
 contested nodes with both quotes, the gaps, and how often each guard fired. It
 is the fastest way to judge a prompt change, because a printed map is easier to
 read than a canvas.
-
-Run that after touching `reducer.ts`, `merge.ts`, `cluster.ts` or `chunk.ts`. It
-drives the same code path the model output goes through, using hand-written
-patches, so a bad map tells you immediately whether the fault is in the reducer
-or in the prompt.
 
 ---
 
@@ -169,7 +169,28 @@ The original 20 smoke assertions pass unchanged.
 | `MERGE_MODEL` | defaults to `PROPOSE_MODEL`. The merge is where quality shows |
 | `CLUSTER_MODEL` | defaults to `PROPOSE_MODEL` |
 | `PROPOSAL_CAP` | orange nodes per pass, default 8 in preload |
-| `PRELOAD_RUN_DIR` | where runs are stored, default `.runs` |
+| `PRELOAD_RUN_DIR` | where runs are stored. Default `.runs` locally, `/tmp/preload-runs` on serverless |
+
+---
+
+## Deploying
+
+It runs on Vercel with no changes, and two things are worth knowing first.
+
+**Set the environment variables in the project settings.** `.env.local` is not
+in this repository, so a fresh deployment has no key. At minimum:
+`LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `EXTRACT_MODEL`, `PROPOSE_MODEL`.
+
+**Runs are only as durable as the instance.** A serverless deployment has a
+read-only filesystem apart from `/tmp`, so that is where runs go. `/tmp` belongs
+to one instance and is wiped on a cold start. Driving a run step after step
+keeps hitting the same warm instance and finishes normally, but a long pause in
+the middle can lose it, and the map will not reopen tomorrow from its `?run=`
+link.
+
+For a demo that is fine. To make R4 true in a deployment, point
+`PRELOAD_RUN_DIR` at a mounted volume, or replace the four functions in
+`runStore.ts` with a real store. They are the only place that touches a disk.
 
 ---
 
