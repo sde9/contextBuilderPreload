@@ -6,6 +6,9 @@ out/
 .env.local
 .env*.local
 
+# vercel link, created by npm run env:link
+.vercel/
+
 # preload runs hold a person's documents verbatim
 .runs/
 

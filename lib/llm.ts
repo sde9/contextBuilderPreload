@@ -39,7 +39,7 @@ type CallArgs = {
 
 async function callAnthropic(a: CallArgs): Promise<unknown> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new LlmError('ANTHROPIC_API_KEY is not set. Copy .env.local.example to .env.local.');
+  if (!key) throw new LlmError('ANTHROPIC_API_KEY is not set. Run npm run env:pull to fetch it from Vercel.');
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

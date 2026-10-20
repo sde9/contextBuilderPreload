@@ -20,9 +20,18 @@ code comments (R1 to R14) point back at it.
 ```bash
 rm -rf node_modules          # if this folder was copied from another machine
 npm install
-cp .env.local.example .env.local     # paste one API key
-npm run dev                          # http://localhost:3000
+npm run env:link                     # once: ties this folder to the Vercel project
+npm run dev                          # pulls env from Vercel, then http://localhost:3000
 ```
+
+The key lives only in the Vercel project settings. `env:pull` writes the
+Development variables to `.env.development.local`, which `next dev` reads ahead
+of `.env.local`, so `.env.local` is left for local tuning such as
+`PROPOSAL_CAP`. `npm run dev` runs `env:pull` first, so a key changed in Vercel
+arrives on the next start. If the pull fails (offline, not signed in, not
+linked) it says so and dev starts with whatever `.env.development.local` already
+holds. A deployed app reads the same variables straight from the project, with
+no file at all.
 
 Real-time is at `/`. Preload is at `/preload`. The switch in the header moves
 between them.
@@ -158,7 +167,9 @@ The original 20 smoke assertions pass unchanged.
 
 ## Configuration
 
-`.env.local`:
+Set in the Vercel project (Settings → Environment Variables) and fetched
+locally with `npm run env:pull`. Anything in `.env.local` applies on top for
+this machine only:
 
 | Variable | Notes |
 |---|---|

@@ -3,7 +3,10 @@
   "version": "0.3.0",
   "private": true,
   "scripts": {
+    "predev": "[ -f .vercel/project.json ] && npm run env:pull --silent </dev/null || echo 'Vercel env not pulled, using the .env files already here. Run npm run env:link once.'",
     "dev": "next dev",
+    "env:link": "npx --yes vercel link --yes --scope sde9s-projects --project context-builder-preload",
+    "env:pull": "npx --yes vercel env pull .env.development.local --yes",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
