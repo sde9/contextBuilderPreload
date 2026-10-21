@@ -21,6 +21,26 @@ export function norm(label: string): string {
     .replace(/(\w)s$/, '$1'); // crude singularise: "members" -> "member"
 }
 
+/** Crude singular for one word, the same rule norm() applies to the last word. */
+const singular = (w: string) => w.replace(/(\w)s$/, '$1');
+
+/**
+ * Guard 5 (Real-time). The speaker just said it, so it is not a guess.
+ *
+ * True when every word of the label longer than two letters appears in the
+ * statement. "School donations" against "donations go to the school" is an
+ * echo; "Ticket price" against "tickets are 20 dollars" is not, because
+ * nobody said "price". Word order and plural endings are ignored.
+ */
+export function saidThisTurn(label: string, statement: string): boolean {
+  const said = new Set(norm(statement).split(' ').filter(Boolean).map(singular));
+  const words = norm(label)
+    .split(' ')
+    .filter((w) => w.length > 2)
+    .map(singular);
+  return words.length > 0 && words.every((w) => said.has(w));
+}
+
 /** Guard 1. Existing visible concept with the same normalised label. */
 export function findDuplicate(model: Model, label: string): Concept | undefined {
   const n = norm(label);

@@ -1,6 +1,6 @@
 {
   "name": "enabler-context-builder-preload",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "predev": "[ -f .vercel/project.json ] && npm run env:pull --silent </dev/null || echo 'Vercel env not pulled, using the .env files already here. Run npm run env:link once.'",
@@ -19,6 +19,7 @@
     "@types/dagre": "^0.7.54",
     "@xyflow/react": "^12.11.0",
     "dagre": "^0.8.5",
+    "html-to-image": "1.11.11",
     "next": "^15.3.0",
     "pdf-parse": "^1.1.1",
     "react": "^19.0.0",

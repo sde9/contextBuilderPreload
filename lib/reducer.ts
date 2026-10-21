@@ -1,7 +1,7 @@
-import type { Blocked, Concept, Excerpt, Kind, Model, Question, Relationship, Statement } from './types';
+import type { Blocked, CallMeta, Concept, Excerpt, Kind, LogEntry, Model, Question, Relationship, Statement } from './types';
 import { conceptDefaults, newId, noBlocks } from './types';
-import type { ExtractPatch, ProposePatch } from './schema';
-import { capProposals, clearRejection, findDuplicate, isRejected, norm, wouldCreateCycle } from './guards';
+import type { ExtractPatch, ProposePatch, ProposePatchRT } from './schema';
+import { capProposals, clearRejection, findDuplicate, isRejected, norm, saidThisTurn, wouldCreateCycle } from './guards';
 import { place, pointsOf, type PlaceKind, type Point } from './place';
 import { layoutLeftToRight, type NodeSize } from './layout';
 
@@ -294,10 +294,30 @@ function layoutNewNodes(
  * lands: rejected labels are dropped, duplicates are dropped, and anything
  * past the cap becomes a question instead of a node.
  */
+/**
+ * Real-time options. Preload passes none, and then applyPropose behaves
+ * exactly as it did before they existed.
+ */
+export type ProposeOptions = {
+  /**
+   * Most new questions per turn, QUESTION concepts and the question list
+   * counted together. Undefined means no limit beyond MAX_OPEN_QUESTIONS.
+   */
+  questionCap?: number;
+  /**
+   * This turn's statement. A proposal whose words were all just said is an
+   * echo of the speaker, not a guess, so it is dropped.
+   */
+  latestStatement?: string;
+};
+
+type QuestionIn = { text: string; usefulness: number; why?: string };
+
 export function applyPropose(
   model: Model,
-  patch: ProposePatch,
-  cap = 5
+  patch: ProposePatch | ProposePatchRT,
+  cap = 5,
+  opts: ProposeOptions = {}
 ): { model: Model; blocked: Blocked } {
   const blocked = noBlocks();
   const at = new Date().toISOString();
@@ -307,7 +327,7 @@ export function applyPropose(
   const relationships = model.relationships.map((r) => ({ ...r }));
 
   const seenThisTurn = new Set<string>();
-  const candidates = patch.concepts.filter((pc) => {
+  const filtered = patch.concepts.filter((pc) => {
     if (!pc.label.trim()) return false;
 
     const anchor = concepts.find((c) => c.id === pc.attachTo && visible(c));
@@ -323,6 +343,10 @@ export function applyPropose(
       blocked.duplicates++;
       return false;
     }
+    if (opts.latestStatement && pc.kind !== 'QUESTION' && saidThisTurn(pc.label, opts.latestStatement)) {
+      blocked.duplicates++;
+      return false;
+    }
     const n = norm(pc.label);
     if (seenThisTurn.has(n)) {
       blocked.duplicates++;
@@ -332,8 +356,21 @@ export function applyPropose(
     return true;
   });
 
+  // Questions are rationed per turn when a cap is set. QUESTION concepts hang
+  // off something concrete, so they are served first; the list gets the rest.
+  let questionBudget = opts.questionCap ?? Number.POSITIVE_INFINITY;
+  const candidates = filtered.filter((pc) => {
+    if (pc.kind !== 'QUESTION') return true;
+    if (questionBudget > 0) {
+      questionBudget--;
+      return true;
+    }
+    blocked.capped++;
+    return false;
+  });
+
   const { keep, overflow } = capProposals(candidates, cap);
-  blocked.capped = overflow.length;
+  blocked.capped += overflow.length;
 
   const taken = pointsOf(concepts);
   const createdIds: string[] = [];
@@ -429,12 +466,22 @@ export function applyPropose(
   }
 
   // Overflow is never lost. It becomes a question instead of a node.
-  const overflowQuestions = overflow.map((pc) => ({
+  const overflowQuestions: QuestionIn[] = overflow.map((pc) => ({
     text: `${pc.label}${pc.label.trim().endsWith('?') ? '' : '?'} ${pc.why}`.trim(),
     usefulness: 3,
+    why: '',
   }));
 
-  const questions = mergeQuestions(model.questions, [...patch.questions, ...overflowQuestions], turn);
+  let incoming: QuestionIn[] = [...(patch.questions as QuestionIn[]), ...overflowQuestions];
+  if (opts.questionCap !== undefined) {
+    // Most useful first, then whatever the per-turn budget still allows.
+    const listed = [...(patch.questions as QuestionIn[])].sort((a, b) => (b.usefulness || 0) - (a.usefulness || 0));
+    const all = [...listed, ...overflowQuestions];
+    incoming = all.slice(0, Math.max(0, questionBudget));
+    blocked.capped += all.length - incoming.length;
+  }
+
+  const questions = mergeQuestions(model.questions, incoming, turn);
 
   const next: Model = {
     ...model,
@@ -447,12 +494,10 @@ export function applyPropose(
   return { model: next, blocked };
 }
 
-function mergeQuestions(
-  current: Question[],
-  incoming: { text: string; usefulness: number }[],
-  turn: number
-): Question[] {
+function mergeQuestions(current: Question[], incoming: QuestionIn[], turn: number): Question[] {
   const out = current.map((q) => ({ ...q }));
+  // Every question ever asked, open or not. A dismissed question asked again
+  // in the same words is therefore never re-added.
   const seen = new Set(out.map((q) => norm(q.text)));
 
   for (const q of incoming) {
@@ -462,9 +507,11 @@ function mergeQuestions(
     out.push({
       id: newId('q'),
       text: q.text.trim(),
+      why: (q.why ?? '').trim(),
       usefulness: Math.max(1, Math.min(5, Math.round(q.usefulness || 3))),
       status: 'OPEN',
       turn,
+      dismissedAt: '',
     });
   }
 
@@ -591,11 +638,46 @@ export function moveConcept(model: Model, conceptId: string, x: number, y: numbe
   };
 }
 
-export function dismissQuestion(model: Model, questionId: string): Model {
+export function dismissQuestion(model: Model, questionId: string, at = new Date().toISOString()): Model {
   return {
     ...model,
-    questions: model.questions.map((q) => (q.id === questionId ? { ...q, status: 'DONE' as const } : q)),
+    questions: model.questions.map((q) =>
+      q.id === questionId ? { ...q, status: 'DONE' as const, dismissedAt: at } : q
+    ),
   };
+}
+
+/**
+ * The session goal. Asked before the first statement and editable later.
+ * While the title is still the default, the goal becomes the title, so files
+ * are named after what the session was for.
+ */
+export function setGoal(model: Model, text: string): Model {
+  const goal = text.trim();
+  if (goal === model.goal) return model;
+  const title = model.title === 'Untitled session' && goal ? goal.slice(0, 60) : model.title;
+  return {
+    ...model,
+    goal,
+    title,
+    log: [...model.log, { turn: model.turn, at: new Date().toISOString(), kind: 'goal' as const, payload: { goal } }],
+  };
+}
+
+/**
+ * Stamp the newest log entry of a kind with the call that produced it. The
+ * reducer cannot know the model name or the token count, so the store adds
+ * them once the response is in.
+ */
+export function withCallMeta(model: Model, kind: LogEntry['kind'], meta: CallMeta): Model {
+  for (let i = model.log.length - 1; i >= 0; i--) {
+    if (model.log[i].kind === kind) {
+      const log = model.log.slice();
+      log[i] = { ...log[i], meta };
+      return { ...model, log };
+    }
+  }
+  return model;
 }
 
 // ------------------------------------------------------------------ selectors
@@ -608,9 +690,47 @@ export const visibleRelationships = (m: Model) => {
 export const openQuestions = (m: Model) =>
   m.questions.filter((q) => q.status === 'OPEN').sort((a, b) => b.usefulness - a.usefulness);
 
+/** How much of the conversation a proposal call carries, in characters. */
+export const CONVERSATION_CHAR_LIMIT = 40000;
+
+/**
+ * Every statement, oldest first, as "T3: text". When the whole conversation
+ * is over the limit, the newest statements go in full and the oldest are cut.
+ */
+export function conversationWindow(m: Model, limit = CONVERSATION_CHAR_LIMIT): { lines: string[]; omitted: number } {
+  const lines: string[] = [];
+  let used = 0;
+  for (let i = m.statements.length - 1; i >= 0; i--) {
+    const s = m.statements[i];
+    const line = `T${s.turn}: ${s.text}`;
+    if (used + line.length > limit && lines.length > 0) break;
+    lines.push(line);
+    used += line.length;
+  }
+  lines.reverse();
+  return { lines, omitted: m.statements.length - lines.length };
+}
+
+/**
+ * Topics the user has closed: questions they dismissed, and question boxes
+ * they rejected. The AI is told never to ask these again.
+ */
+export function closedQuestions(m: Model): string[] {
+  const dismissed = m.questions.filter((q) => q.dismissedAt).map((q) => q.text);
+  const rejected = m.concepts.filter((c) => c.kind === 'QUESTION' && c.status === 'REJECTED').map((c) => c.label);
+  return [...dismissed, ...rejected];
+}
+
 /** The compact projection sent to the LLM. Never the whole model. */
 export function contextPayload(m: Model) {
+  const conversation = conversationWindow(m);
   return {
+    goal: m.goal,
+    conversation: conversation.lines,
+    omittedStatements: conversation.omitted,
+    // Filled in when questions can be answered (Release 2). Empty until then.
+    answeredQuestions: [] as { text: string; answer: string }[],
+    closedQuestions: closedQuestions(m),
     title: m.title,
     concepts: visibleConcepts(m).map((c) => ({
       id: c.id,

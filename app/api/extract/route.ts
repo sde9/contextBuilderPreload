@@ -5,6 +5,7 @@ import { LlmError, structured } from '@/lib/llm';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 /*
  * Call 1. Green only.
@@ -24,9 +25,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No text' }, { status: 400 });
     }
 
-    const { value, ms } = await structured(
+    const model = process.env.EXTRACT_MODEL || 'claude-haiku-4-5-20251001';
+    const { value, ms, usage } = await structured(
       {
-        model: process.env.EXTRACT_MODEL || 'claude-haiku-4-5-20251001',
+        model,
         system: EXTRACT_SYSTEM,
         user: extractUser({ text, concepts: concepts ?? [] }),
         schemaName: 'extract_patch',
@@ -37,7 +39,7 @@ export async function POST(req: Request) {
       ExtractPatch
     );
 
-    return NextResponse.json({ patch: value, ms, promptVersion: PROMPT_VERSION });
+    return NextResponse.json({ patch: value, ms, usage, model, promptVersion: PROMPT_VERSION });
   } catch (e) {
     const err = e as LlmError;
     console.error('[extract]', err.message, err.detail ?? '');

@@ -13,6 +13,8 @@ export default function Composer() {
   const pending = useSession((s) => s.pending);
   const error = useSession((s) => s.error);
   const submit = useSession((s) => s.submit);
+  // RT-US-01. Nothing goes in until the session has a goal.
+  const noGoal = useSession((s) => !s.model.goal);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   // A failed turn puts the words back rather than losing them.
@@ -21,7 +23,7 @@ export default function Composer() {
   }, [error, pending]);
 
   const send = async () => {
-    if (!text.trim() || phase !== 'idle') return;
+    if (!text.trim() || phase !== 'idle' || noGoal) return;
     const sent = text;
     setText('');
     await submit(sent);
@@ -54,11 +56,11 @@ export default function Composer() {
               void send();
             }
           }}
-          placeholder="Paste what was just said, then Continue…"
+          placeholder={noGoal ? 'Set a goal first' : 'Paste what was just said, then Continue…'}
           rows={2}
-          disabled={busy}
+          disabled={busy || noGoal}
         />
-        <button className="continue" onClick={() => void send()} disabled={busy || !text.trim()}>
+        <button className="continue" onClick={() => void send()} disabled={busy || noGoal || !text.trim()}>
           {busy ? '…' : 'Continue'}
           <kbd>⌘⏎</kbd>
         </button>

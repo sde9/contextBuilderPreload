@@ -6,7 +6,7 @@
  * back to the wording that produced it.
  */
 
-export const PROMPT_VERSION = 'p3-2026-08-18';
+export const PROMPT_VERSION = 'p4-2026-10-21';
 
 const KIND_VOCAB = `
 KIND. Seven values, and they classify the ROLE a thing plays in the
@@ -150,6 +150,37 @@ export function extractUser(input: {
   return `CONCEPTS ALREADY ON THE MAP\n${list}\n\nWHAT THE PERSON JUST SAID\n"""\n${input.text}\n"""`;
 }
 
+/*
+ * Real-time only. Appended to PROPOSE_SYSTEM by app/api/propose/route.ts.
+ * Preload's pipeline uses PROPOSE_SYSTEM on its own, so none of this reaches
+ * a document run.
+ */
+export const PROPOSE_REALTIME_RULES = `
+LIVE SESSION RULES. These come on top of everything above and win where
+they differ.
+
+GOAL. The person told you what they want to get out of this conversation.
+Everything you propose must help them reach that goal. A gap that does not
+matter for the goal is not worth their attention: leave it out, however
+true it is.
+
+THE WHOLE CONVERSATION. You are given everything said so far, oldest first,
+not only the last few lines. Read all of it before you propose anything.
+
+NO ECHO. Never propose something the person already said. If it appears
+anywhere in THE WHOLE CONVERSATION SO FAR, it is already on the map in their
+words and does not need a yes or no from them.
+
+QUESTIONS. At most 2 per turn in total, counting concepts of kind QUESTION
+and the questions list together. Ask only what moves the goal forward. Give
+each list question a "why": one short line on how answering it helps the
+goal.
+
+CLOSED TOPICS. Never ask again a question listed as answered or closed, in
+any wording. When the person has answered or closed a topic, stop digging
+into it. Go back to it only if their latest words reopen it.
+`.trim();
+
 export function proposeUser(payload: {
   title: string;
   concepts: { id: string; label: string; note: string; status: string; kind: string }[];
@@ -157,6 +188,13 @@ export function proposeUser(payload: {
   rejected: { label: string; why: string }[];
   openQuestions: string[];
   recentStatements: string[];
+  // Real-time only. Each block below prints only when it has content, so a
+  // Preload payload, which leaves them empty, produces the same prompt as before.
+  goal?: string;
+  conversation?: string[];
+  omittedStatements?: number;
+  answeredQuestions?: { text: string; answer: string }[];
+  closedQuestions?: string[];
 }): string {
   const concepts = payload.concepts.length
     ? payload.concepts
@@ -180,7 +218,23 @@ export function proposeUser(payload: {
     ? payload.recentStatements.map((s) => `  - ${s}`).join('\n')
     : '  (none)';
 
+  const goal = (payload.goal ?? '').trim();
+  const conversation = payload.conversation ?? [];
+  const answered = payload.answeredQuestions ?? [];
+  const closed = payload.closedQuestions ?? [];
+
+  const said = conversation.length
+    ? [
+        `THE WHOLE CONVERSATION SO FAR, oldest first`,
+        ...(payload.omittedStatements
+          ? [`  (${payload.omittedStatements} earlier statements left out for length)`]
+          : []),
+        conversation.map((s) => `  ${s}`).join('\n'),
+      ]
+    : [`WHAT WAS SAID RECENTLY`, recent];
+
   return [
+    ...(goal ? [`GOAL OF THIS SESSION: ${goal}`, ``] : []),
     `SUBJECT: ${payload.title}`,
     ``,
     `CURRENT MAP`,
@@ -194,9 +248,14 @@ export function proposeUser(payload: {
     ``,
     `QUESTIONS ALREADY OPEN — do not repeat these either`,
     questions,
+    ...(answered.length
+      ? [``, `QUESTIONS ALREADY ANSWERED — never ask these again`, answered.map((q) => `  - ${q.text} Answer: ${q.answer}`).join('\n')]
+      : []),
+    ...(closed.length
+      ? [``, `QUESTIONS THE PERSON CLOSED — never ask these again, in any wording`, closed.map((q) => `  - ${q}`).join('\n')]
+      : []),
     ``,
-    `WHAT WAS SAID RECENTLY`,
-    recent,
+    ...said,
   ].join('\n');
 }
 

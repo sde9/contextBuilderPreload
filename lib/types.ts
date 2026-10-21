@@ -135,9 +135,16 @@ export type MergeTrace = { absorbedId: string; end: 'from' | 'to'; prevStatus: S
 export type Question = {
   id: string;
   text: string;
+  /** One short line on why this matters for the session goal. "" when the AI gave none. */
+  why: string;
   usefulness: number;
   status: 'OPEN' | 'DONE';
   turn: number;
+  /**
+   * Set when the user dismissed it. DONE alone is ambiguous: the open-list cap
+   * also retires questions to DONE. Only a dismissed question is a closed topic.
+   */
+  dismissedAt: string;
 };
 
 /**
@@ -185,11 +192,17 @@ export function addBlocks(a: Blocked, b: Blocked): Blocked {
 export type LogEntry = {
   turn: number;
   at: string;
-  kind: 'extract' | 'propose' | 'confirm' | 'reject' | 'merge' | 'split' | 'cluster' | 'resolve' | 'edit';
+  kind: 'extract' | 'propose' | 'confirm' | 'reject' | 'merge' | 'split' | 'cluster' | 'resolve' | 'edit' | 'goal';
   payload: unknown;
   /** Guard activity, so prompt failures are measurable rather than invisible. */
   blocked?: Blocked;
+  /** Which model answered, how long it took and what it cost. Real-time calls only. */
+  meta?: CallMeta;
 };
+
+export type Usage = { input: number; output: number };
+
+export type CallMeta = { model: string; ms: number; usage: Usage | null };
 
 // ==========================================================================
 // PRELOAD
@@ -308,6 +321,12 @@ export type Model = {
   schemaVersion: '0.1' | '0.2';
   sessionId: string;
   title: string;
+  /**
+   * Real-time only. What the user wants to get out of the conversation, asked
+   * before the first statement. Every proposal is judged against it. "" in
+   * Preload and in files saved before the goal existed.
+   */
+  goal: string;
   turn: number;
   statements: Statement[];
   concepts: Concept[];
@@ -330,6 +349,7 @@ export function emptyModel(sessionId: string): Model {
     schemaVersion: '0.2',
     sessionId,
     title: 'Untitled session',
+    goal: '',
     turn: 0,
     statements: [],
     concepts: [],
@@ -370,12 +390,15 @@ export function normaliseModel(raw: Partial<Model> & { sessionId?: string }): Mo
     clusterId: c.clusterId ?? '',
   }));
   const relationships = (raw.relationships ?? []).map((r) => ({ ...r, merges: r.merges ?? [] }));
+  const questions = (raw.questions ?? []).map((q) => ({ ...q, why: q.why ?? '', dismissedAt: q.dismissedAt ?? '' }));
   return {
     ...base,
     ...raw,
     schemaVersion: '0.2',
+    goal: typeof raw.goal === 'string' ? raw.goal : '',
     concepts,
     relationships,
+    questions,
     sources: raw.sources ?? [],
     chunks: raw.chunks ?? [],
     excerpts: raw.excerpts ?? [],

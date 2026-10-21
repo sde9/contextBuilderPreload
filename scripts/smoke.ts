@@ -16,11 +16,18 @@
  * ownership, orphan downgrade, cycle refusal, and re-parenting on reject.
  */
 
-import { emptyModel, resolveKind } from '../lib/types';
+import { emptyModel, normaliseModel, resolveKind } from '../lib/types';
+import { saidThisTurn } from '../lib/guards';
 import {
   applyExtract,
   applyPropose,
+  closedQuestions,
   confirmConcept,
+  contextPayload,
+  conversationWindow,
+  dismissQuestion,
+  setGoal,
+  withCallMeta,
   confirmRelationship,
   rejectConcept,
   rejectRelationship,
@@ -450,6 +457,130 @@ check('an old-format concept carrying viewHint STRUCTURE loads as kind ENTITY', 
 check('an old-format concept carrying viewHint FLOW loads as kind STEP', resolveKind({ viewHint: 'FLOW' }) === 'STEP');
 check('a concept with neither kind nor viewHint defaults to ENTITY', resolveKind({}) === 'ENTITY');
 check('a concept with a valid kind keeps it', resolveKind({ kind: 'RULE' }) === 'RULE');
+
+
+// ==== Real-time refinements, Release 1 ==========================================
+
+// ---- RT-US-01: the goal ------------------------------------------------------
+{
+  let g = emptyModel('s_goal');
+  check('a new model has an empty goal', g.goal === '');
+  g = setGoal(g, '  Plan the 12 December concert and fair  ');
+  check('setGoal trims and stores the goal', g.goal === 'Plan the 12 December concert and fair');
+  check('the goal becomes the title while the title is the default', g.title === 'Plan the 12 December concert and fair');
+  check('setGoal writes a goal entry to the log', g.log.at(-1)?.kind === 'goal');
+  const titled = setGoal({ ...g, title: 'My own title' }, 'Something else');
+  check('a changed goal never overwrites a title the session already has', titled.title === 'My own title' && titled.goal === 'Something else');
+  check('the goal is in the proposal payload', contextPayload(g).goal === 'Plan the 12 December concert and fair');
+  check('a file saved before the goal existed loads with an empty goal', normaliseModel({ ...emptyModel('old'), goal: undefined as unknown as string }).goal === '');
+}
+
+// ---- RT-US-02: the whole conversation ---------------------------------------
+{
+  let c = setGoal(emptyModel('s_conv'), 'Understand the onboarding');
+  for (let i = 1; i <= 10; i++) {
+    ({ model: c } = applyExtract(c, { concepts: [], relationships: [] }, `statement number ${i}`));
+  }
+  const p = contextPayload(c);
+  check('a 10-turn session sends all 10 statements, oldest first', p.conversation.length === 10 && p.conversation[0] === 'T1: statement number 1' && p.conversation[9] === 'T10: statement number 10');
+  check('nothing is cut from a short conversation', p.omittedStatements === 0);
+  check('recentStatements is still there for Preload', p.recentStatements.length === 3);
+  const w = conversationWindow(c, 70);
+  check('over the limit, the newest statements stay and the oldest are cut', w.lines.at(-1) === 'T10: statement number 10' && w.omitted > 0 && w.lines.length + w.omitted === 10);
+}
+
+// ---- RT-US-03: question cap, why, closed topics -----------------------------
+{
+  let q = emptyModel('s_q');
+  ({ model: q } = applyExtract(
+    q,
+    { concepts: [{ tempId: 'a', label: 'Donations', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }], relationships: [] },
+    'We collect donations at the concert.'
+  ));
+  const anchor = q.concepts[0];
+  const four = {
+    concepts: [],
+    relationships: [],
+    questions: [
+      { text: 'Who counts the money?', usefulness: 2, why: 'Someone has to own it.' },
+      { text: 'Where will the donations go?', usefulness: 5, why: 'Decides the message on the night.' },
+      { text: 'Is there a card reader?', usefulness: 4, why: 'Many people carry no cash.' },
+      { text: 'Who designs the poster?', usefulness: 1, why: '' },
+    ],
+  };
+  const capped = applyPropose(q, four, 5, { questionCap: 2 });
+  const added = capped.model.questions;
+  check('with a cap of 2, four proposed questions become 2', added.length === 2);
+  check('the 2 kept are the most useful', added.some((x) => x.text === 'Where will the donations go?') && added.some((x) => x.text === 'Is there a card reader?'));
+  check('the dropped ones are counted as capped', capped.blocked.capped === 2);
+  check('a question keeps its why', added.find((x) => x.text === 'Where will the donations go?')?.why === 'Decides the message on the night.');
+
+  const uncapped = applyPropose(q, four, 5);
+  check('without options, all four questions are added as before', uncapped.model.questions.length === 4);
+
+  const qConcepts = applyPropose(
+    q,
+    {
+      concepts: [
+        { tempId: 'x1', label: 'Who handles cash?', why: '', attachTo: anchor.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+        { tempId: 'x2', label: 'Who signs off?', why: '', attachTo: anchor.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+        { tempId: 'x3', label: 'Who keeps receipts?', why: '', attachTo: anchor.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+      ],
+      relationships: [],
+      questions: [{ text: 'Is there a target amount?', usefulness: 5, why: '' }],
+    },
+    5,
+    { questionCap: 2 }
+  );
+  const qBoxes = visibleConcepts(qConcepts.model).filter((c) => c.kind === 'QUESTION');
+  check('question boxes count against the same cap, and use it first', qBoxes.length === 2 && qConcepts.model.questions.length === 0);
+
+  const firstId = added.find((x) => x.text === 'Where will the donations go?')!.id;
+  const dismissed = dismissQuestion(capped.model, firstId, '2026-10-21T00:00:00.000Z');
+  check('a dismissed question records when', dismissed.questions.find((x) => x.id === firstId)?.dismissedAt === '2026-10-21T00:00:00.000Z');
+  check('a dismissed question is a closed topic in the payload', contextPayload(dismissed).closedQuestions.includes('Where will the donations go?'));
+  check('a question retired by the open-list cap is not a closed topic', closedQuestions({ ...dismissed, questions: dismissed.questions.map((x) => ({ ...x, status: 'DONE' as const })) }).length === 1);
+  const again = applyPropose(dismissed, { concepts: [], relationships: [], questions: [{ text: 'Where will the donations go?', usefulness: 5, why: '' }] }, 5, { questionCap: 2 });
+  check('a dismissed question asked again in the same words is not re-added', again.model.questions.filter((x) => x.text === 'Where will the donations go?').length === 1);
+}
+
+// ---- RT-US-04: no echo -------------------------------------------------------
+{
+  check('every word said means an echo', saidThisTurn('School donations', 'Donations go to the school'));
+  check('a word nobody said means a real guess', !saidThisTurn('Ticket price', 'tickets are 20 dollars'));
+  check('an empty label is never an echo', !saidThisTurn('', 'anything'));
+
+  let e = emptyModel('s_echo');
+  ({ model: e } = applyExtract(
+    e,
+    { concepts: [{ tempId: 'a', label: 'Concert', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }], relationships: [] },
+    'Donations go to the school after the concert.'
+  ));
+  const concert = e.concepts[0];
+  const echoPatch = {
+    concepts: [
+      { tempId: 'p1', label: 'School donations', why: '', attachTo: concert.id, relationLabel: 'raises', kind: 'ENTITY' as const, isPropertyOfTarget: false },
+      { tempId: 'p2', label: 'Ticket price', why: '', attachTo: concert.id, relationLabel: 'has', kind: 'ATTRIBUTE' as const, isPropertyOfTarget: true },
+    ],
+    relationships: [],
+    questions: [],
+  };
+  const echoed = applyPropose(e, echoPatch, 5, { latestStatement: 'Donations go to the school after the concert.' });
+  const labels = visibleConcepts(echoed.model).map((c) => c.label);
+  check('a proposal that only repeats the statement is dropped', !labels.includes('School donations'));
+  check('a real guess in the same turn still lands', labels.includes('Ticket price'));
+  check('the echo is counted as a duplicate', echoed.blocked.duplicates === 1);
+  const preloadLike = applyPropose(e, echoPatch, 5);
+  check('without a latest statement (Preload), nothing is dropped as an echo', visibleConcepts(preloadLike.model).some((c) => c.label === 'School donations'));
+}
+
+// ---- call meta ---------------------------------------------------------------
+{
+  let t = emptyModel('s_meta');
+  ({ model: t } = applyExtract(t, { concepts: [], relationships: [] }, 'hello'));
+  t = withCallMeta(t, 'extract', { model: 'claude-haiku-4-5-20251001', ms: 900, usage: { input: 120, output: 40 } });
+  check('the extract log entry carries model, time and tokens', t.log.at(-1)?.meta?.usage?.input === 120 && t.log.at(-1)?.meta?.model === 'claude-haiku-4-5-20251001');
+}
 
 console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) failed.`}`);
 process.exit(failures === 0 ? 0 : 1);

@@ -190,6 +190,43 @@ export const PROPOSE_JSON_SCHEMA = {
   },
 } as const;
 
+/*
+ * Real-time variant of Call 2. Preload's pipeline calls the propose model
+ * with ProposePatch directly, so fields the live mode needs are added here
+ * instead of on the shared schema. Each question carries a one-line reason
+ * tied to the session goal.
+ */
+export const ProposePatchRT = ProposePatch.extend({
+  questions: z.array(
+    z.object({
+      text: z.string(),
+      usefulness: z.number(),
+      why: z.string().optional(),
+    })
+  ),
+});
+
+export type ProposePatchRT = z.infer<typeof ProposePatchRT>;
+
+export const PROPOSE_RT_JSON_SCHEMA = {
+  ...PROPOSE_JSON_SCHEMA,
+  properties: {
+    ...PROPOSE_JSON_SCHEMA.properties,
+    questions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text', 'usefulness', 'why'],
+        properties: {
+          ...PROPOSE_JSON_SCHEMA.properties.questions.items.properties,
+          why: { type: 'string', description: 'One short line on why this matters for the goal.' },
+        },
+      },
+    },
+  },
+} as const;
+
 // ---------------------------------------------------------------- Call 3
 
 /*

@@ -14,10 +14,17 @@ import {
   moveConcept,
   rejectConcept,
   rejectRelationship,
+  setGoal,
+  withCallMeta,
 } from './reducer';
-import { ExtractPatch, ProposePatch } from './schema';
+import { ExtractPatch, ProposePatchRT } from './schema';
 import type { NodeSize } from './layout';
 import { toDrawioXml, toMermaid } from './export';
+import { saveDataUrl, saveText } from './download';
+import { clearSession, parseSessionFile } from './persist';
+
+/** Most new questions per turn in a live session (RT-US-03). */
+const QUESTION_CAP = Number(process.env.NEXT_PUBLIC_QUESTION_CAP) || 2;
 
 export type Phase = 'idle' | 'reading' | 'thinking';
 
@@ -34,6 +41,14 @@ type State = {
   blocked: Blocked;
 
   submit: (text: string) => Promise<void>;
+  setGoal: (text: string) => void;
+  /** Replace the session with one restored from this browser or from a file. */
+  restore: (model: Model) => void;
+  openFile: (file: File) => Promise<void>;
+  /** Set by the canvas, which is the only place that can draw the map. */
+  capture: (() => Promise<string>) | null;
+  registerCapture: (fn: (() => Promise<string>) | null) => void;
+  exportPicture: () => Promise<void>;
   confirm: (id: string) => void;
   reject: (id: string) => void;
   confirmRelationship: (id: string) => void;
@@ -57,14 +72,9 @@ function filenameBase(m: Model): string {
   return `${stamp}_${safe}`;
 }
 
-function saveTextFile(filename: string, mime: string, content: string): void {
-  const blob = new Blob([content], { type: mime });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
+type CallBody = { ms?: number; usage?: { input: number; output: number } | null; model?: string };
+
+const metaOf = (body: CallBody) => ({ model: body.model ?? '', ms: body.ms ?? 0, usage: body.usage ?? null });
 
 /*
  * One animation at a time. A second layout request cancels the first rather
@@ -87,6 +97,7 @@ export const useSession = create<State>((set, get) => ({
   autoTidy: true,
   lastMs: { extract: 0, propose: 0 },
   blocked: noBlocks(),
+  capture: null,
 
   /*
    * The two-phase turn.
@@ -121,7 +132,7 @@ export const useSession = create<State>((set, get) => ({
 
       const patch = ExtractPatch.parse(body.patch);
       const applied = applyExtract(get().model, patch, trimmed);
-      afterExtract = applied.model;
+      afterExtract = withCallMeta(applied.model, 'extract', metaOf(body));
 
       set((s) => ({
         model: afterExtract,
@@ -150,10 +161,13 @@ export const useSession = create<State>((set, get) => ({
 
       const body = await res.json();
       if (res.ok && body.patch) {
-        const patch = ProposePatch.parse(body.patch);
-        const applied = applyPropose(get().model, patch, Number(process.env.NEXT_PUBLIC_PROPOSAL_CAP) || 5);
+        const patch = ProposePatchRT.parse(body.patch);
+        const applied = applyPropose(get().model, patch, Number(process.env.NEXT_PUBLIC_PROPOSAL_CAP) || 5, {
+          questionCap: QUESTION_CAP,
+          latestStatement: trimmed,
+        });
         set((s) => ({
-          model: applied.model,
+          model: withCallMeta(applied.model, 'propose', metaOf(body)),
           blocked: addBlocks(s.blocked, applied.blocked),
           lastMs: { ...s.lastMs, propose: body.ms ?? 0 },
         }));
@@ -251,20 +265,49 @@ export const useSession = create<State>((set, get) => ({
   dismiss: (id) => set((s) => ({ model: dismissQuestion(s.model, id) })),
   toggleSuggestions: () => set((s) => ({ suggestions: !s.suggestions })),
   toggleAutoTidy: () => set((s) => ({ autoTidy: !s.autoTidy })),
-  reset: () => set({ model: emptyModel(newId('s')), phase: 'idle', pending: '', error: '', blocked: noBlocks() }),
+  reset: () => {
+    clearSession();
+    set({ model: emptyModel(newId('s')), phase: 'idle', pending: '', error: '', blocked: noBlocks() });
+  },
+
+  setGoal: (text) => set((s) => ({ model: setGoal(s.model, text) })),
+
+  restore: (model) => set({ model, phase: 'idle', pending: '', error: '', blocked: noBlocks() }),
+
+  openFile: async (file) => {
+    try {
+      const model = parseSessionFile(await file.text());
+      set({ model, phase: 'idle', pending: '', error: '', blocked: noBlocks() });
+    } catch (e) {
+      set({ error: (e as Error).message });
+    }
+  },
+
+  registerCapture: (fn) => set({ capture: fn }),
+
+  exportPicture: async () => {
+    const capture = get().capture;
+    if (!capture) return;
+    try {
+      const dataUrl = await capture();
+      saveDataUrl(`${filenameBase(get().model)}.png`, dataUrl);
+    } catch {
+      set({ error: 'Could not make a picture of the map. Try again after Tidy up.' });
+    }
+  },
 
   download: () => {
     const m = get().model;
-    saveTextFile(`${filenameBase(m)}.context.json`, 'application/json', JSON.stringify(m, null, 2));
+    saveText(`${filenameBase(m)}.context.json`, 'application/json', JSON.stringify(m, null, 2));
   },
 
   exportDrawio: () => {
     const m = get().model;
-    saveTextFile(`${filenameBase(m)}.drawio`, 'application/xml', toDrawioXml(m));
+    saveText(`${filenameBase(m)}.drawio`, 'application/xml', toDrawioXml(m));
   },
 
   exportMermaid: () => {
     const m = get().model;
-    saveTextFile(`${filenameBase(m)}.mmd`, 'text/plain', toMermaid(m));
+    saveText(`${filenameBase(m)}.mmd`, 'text/plain', toMermaid(m));
   },
 }));

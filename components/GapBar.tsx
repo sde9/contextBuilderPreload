@@ -19,6 +19,8 @@ export default function GapBar() {
         {open.map((q) => (
           <li key={q.id} className="clarify-item">
             <div className="gap-question">{q.text}</div>
+            {/* RT-US-03. Why this question matters for the goal, in one line. */}
+            {q.why && <div className="gap-why">{q.why}</div>}
             <button
               className="gap-dismiss"
               onClick={() => dismiss(q.id)}

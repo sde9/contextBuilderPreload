@@ -63,6 +63,30 @@ read than a canvas.
 
 ---
 
+## Real-time, Release 1 (21 Oct 2026)
+
+Changes from the test with Gena. Story IDs refer to *CB Real-time Requirements
+and User Stories v0.1*.
+
+| Story | What changed for the user | Where |
+|---|---|---|
+| RT-US-15 | Download, draw.io and Mermaid save a file and leave the page as it was | `lib/download.ts` |
+| RT-US-16 | The session is kept in this browser. After a reload a bar offers Restore or Discard. Closing the tab asks first. **Open** loads a downloaded `.context.json` | `lib/persist.ts`, `components/RestoreBar.tsx` |
+| RT-US-01 | A session starts with its goal. The goal stays in the header; click it to change it | `components/GoalStart.tsx`, `components/GoalBadge.tsx`, `setGoal` |
+| RT-US-02 | Proposals see the goal and the whole conversation (up to 40,000 characters), not only the last 3 statements | `contextPayload`, `proposeUser`, `PROPOSE_REALTIME_RULES` |
+| RT-US-03 | At most 2 new questions per turn (`NEXT_PUBLIC_QUESTION_CAP`), each with a line on why it matters. Dismissed questions are never asked again | `applyPropose` options, `ProposePatchRT` |
+| RT-US-04 | A proposal whose words were all just said is dropped as an echo | `saidThisTurn` in `lib/guards.ts` |
+| RT-US-17 | **Picture**, next to Tidy up, saves the whole map as a PNG | `lib/snapshot.ts` |
+
+Every proposal and extract log entry now records the model, time and tokens
+(`log[].meta`), so the cost of a session can be read from its file.
+
+Preload is unchanged: the new prompt rules and schema fields are Real-time
+variants that the pipeline does not use, and `applyPropose` behaves as before
+when it is called without options.
+
+---
+
 ## What preload does
 
 ```

@@ -24,6 +24,7 @@ import ConceptEdge from './ConceptEdge';
 import { useSession } from '@/lib/store';
 import { visibleConcepts, visibleRelationships } from '@/lib/reducer';
 import type { NodeSize } from '@/lib/layout';
+import { mapToPng } from '@/lib/snapshot';
 
 const nodeTypes = { concept: ConceptNode };
 const edgeTypes = { concept: ConceptEdge };
@@ -61,7 +62,10 @@ function Flow() {
   const autoTidy = useSession((s) => s.autoTidy);
   const move = useSession((s) => s.move);
   const layoutTo = useSession((s) => s.layoutTo);
-  const { getNodes, fitView } = useReactFlow();
+  const registerCapture = useSession((s) => s.registerCapture);
+  const exportPicture = useSession((s) => s.exportPicture);
+  const { getNodes, getNodesBounds, fitView } = useReactFlow();
+  const wrapper = useRef<HTMLDivElement>(null);
   const nodesInitialized = useNodesInitialized();
 
   /** True once the user has panned or zoomed by hand. Stops auto-fit stealing the view. */
@@ -182,6 +186,17 @@ function Flow() {
     void runLayout(concepts.length > ANIMATION_LIMIT ? 0 : LAYOUT_MS, !viewportMoved.current);
   }, [autoTidy, nodesInitialized, topology, concepts.length, getNodes, runLayout]);
 
+  // RT-US-17. The header and other panels sit outside the React Flow provider,
+  // so the canvas hands the store a way to draw the whole map as a PNG.
+  useEffect(() => {
+    registerCapture(async () => {
+      const el = wrapper.current?.querySelector<HTMLElement>('.react-flow__viewport');
+      if (!el) throw new Error('The map is not on screen.');
+      return mapToPng(getNodesBounds(getNodes()), el);
+    });
+    return () => registerCapture(null);
+  }, [registerCapture, getNodes, getNodesBounds]);
+
   const tidyUp = useCallback(() => {
     // An explicit Tidy up is also a request to see the whole thing again.
     viewportMoved.current = false;
@@ -191,6 +206,7 @@ function Flow() {
 
   return (
     <ReactFlow
+      ref={wrapper}
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
@@ -215,6 +231,14 @@ function Flow() {
           title={autoTidy ? 'Re-arrange now and fit the whole map on screen' : 'Re-arrange left to right, no overlaps'}
         >
           Tidy up
+        </button>
+        <button
+          className="btn-tidy btn-picture"
+          onClick={() => void exportPicture()}
+          disabled={nodes.length === 0}
+          title="Save the whole map as a PNG picture"
+        >
+          Picture
         </button>
       </Panel>
     </ReactFlow>

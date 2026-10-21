@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { Usage } from './types';
 
 /*
  * One thin adapter over two providers, using plain fetch rather than an SDK.
@@ -37,7 +38,7 @@ type CallArgs = {
   temperature?: number;
 };
 
-async function callAnthropic(a: CallArgs): Promise<unknown> {
+async function callAnthropic(a: CallArgs): Promise<Answer> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new LlmError('ANTHROPIC_API_KEY is not set. Run npm run env:pull to fetch it from Vercel.');
 
@@ -67,13 +68,19 @@ async function callAnthropic(a: CallArgs): Promise<unknown> {
 
   if (!res.ok) throw new LlmError(`Anthropic ${res.status}`, await res.text());
 
-  const body = (await res.json()) as { content?: { type: string; input?: unknown }[] };
+  const body = (await res.json()) as {
+    content?: { type: string; input?: unknown }[];
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
   const block = body.content?.find((c) => c.type === 'tool_use');
   if (!block?.input) throw new LlmError('Anthropic returned no tool_use block', body);
-  return block.input;
+  return {
+    value: block.input,
+    usage: body.usage ? { input: body.usage.input_tokens ?? 0, output: body.usage.output_tokens ?? 0 } : null,
+  };
 }
 
-async function callOpenAI(a: CallArgs): Promise<unknown> {
+async function callOpenAI(a: CallArgs): Promise<Answer> {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new LlmError('OPENAI_API_KEY is not set. Copy .env.local.example to .env.local.');
 
@@ -95,27 +102,46 @@ async function callOpenAI(a: CallArgs): Promise<unknown> {
 
   if (!res.ok) throw new LlmError(`OpenAI ${res.status}`, await res.text());
 
-  const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+  const body = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
   const text = body.choices?.[0]?.message?.content;
   if (!text) throw new LlmError('OpenAI returned no content', body);
+  const usage = body.usage ? { input: body.usage.prompt_tokens ?? 0, output: body.usage.completion_tokens ?? 0 } : null;
   try {
-    return JSON.parse(text);
+    return { value: JSON.parse(text), usage };
   } catch {
     throw new LlmError('OpenAI returned unparseable JSON', text);
   }
 }
 
-async function once(a: CallArgs): Promise<unknown> {
+/** One provider answer, before validation. Usage is null when the provider sent none. */
+type Answer = { value: unknown; usage: Usage | null };
+
+async function once(a: CallArgs): Promise<Answer> {
   return provider() === 'openai' ? callOpenAI(a) : callAnthropic(a);
 }
 
-/** Call, validate, retry once with the validation errors appended, then give up. */
-export async function structured<T>(a: CallArgs, schema: z.ZodType<T>): Promise<{ value: T; ms: number }> {
+function addUsage(a: Usage | null, b: Usage | null): Usage | null {
+  if (!a) return b;
+  if (!b) return a;
+  return { input: a.input + b.input, output: a.output + b.output };
+}
+
+/**
+ * Call, validate, retry once with the validation errors appended, then give up.
+ * Usage covers both attempts when a retry happened, because both were paid for.
+ */
+export async function structured<T>(
+  a: CallArgs,
+  schema: z.ZodType<T>
+): Promise<{ value: T; ms: number; usage: Usage | null }> {
   const started = Date.now();
 
   const first = await once(a);
-  const parsed = schema.safeParse(first);
-  if (parsed.success) return { value: parsed.data, ms: Date.now() - started };
+  const parsed = schema.safeParse(first.value);
+  if (parsed.success) return { value: parsed.data, ms: Date.now() - started, usage: first.usage };
 
   const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
 
@@ -124,8 +150,8 @@ export async function structured<T>(a: CallArgs, schema: z.ZodType<T>): Promise<
     user: `${a.user}\n\nYour previous answer did not fit the required shape:\n${issues}\nReturn the same information in the correct shape.`,
   });
 
-  const second = schema.safeParse(retry);
-  if (second.success) return { value: second.data, ms: Date.now() - started };
+  const second = schema.safeParse(retry.value);
+  if (second.success) return { value: second.data, ms: Date.now() - started, usage: addUsage(first.usage, retry.usage) };
 
   throw new LlmError('Response did not match the schema after one retry', second.error.issues);
 }

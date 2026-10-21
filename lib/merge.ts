@@ -208,6 +208,7 @@ export function combineSourceModels(models: Model[], sources: Source[]): { model
     schemaVersion: '0.2',
     sessionId: base?.sessionId ?? newId('s'),
     title: base?.title ?? 'Untitled session',
+    goal: '',
     turn: 1,
     statements: ordered.flatMap((m) => m.statements),
     concepts: ordered.flatMap((m) => m.concepts.map((c) => ({ ...c, evidence: [...c.evidence], mergedFrom: [...c.mergedFrom] }))),
