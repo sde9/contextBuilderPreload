@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { readProbe, storageKind, writeProbe } from '@/lib/runStore';
+import { readProbe, storageEnvNames, storageKind, writeProbe } from '@/lib/runStore';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -22,6 +22,10 @@ export async function GET(req: Request) {
     const back = await readProbe();
     return NextResponse.json({ ok: back === token, storage: kind, roundTrip: back === token });
   } catch (e) {
-    return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 503 });
+    // Variable names only, so a missing connection can be told from a wrong one.
+    return NextResponse.json(
+      { ok: false, error: (e as Error).message, env: process.env.VERCEL_ENV ?? 'local', seen: storageEnvNames() },
+      { status: 503 }
+    );
   }
 }

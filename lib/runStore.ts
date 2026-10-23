@@ -18,7 +18,9 @@ import type { Chunk, Model } from './types';
  *   PRELOAD_RUN_DIR set          that folder on disk (a mounted volume, or
  *                                a fixed path when self-hosting)
  *   BLOB_READ_WRITE_TOKEN set    the project's private Vercel Blob store.
- *                                Connecting a store in Vercel sets this.
+ *                                Connecting a store in Vercel sets this
+ *                                (or <PREFIX>_READ_WRITE_TOKEN, or
+ *                                BLOB_STORE_ID for OIDC; see blobAuth).
  *   neither, running locally     .runs/ next to the project
  *   neither, on serverless       refuse, with a message that says what to
  *                                connect. A temporary disk would look as if
@@ -100,20 +102,23 @@ function diskStorage(root: string): RunStorage {
  * The SDK is imported on first use, so local runs and the smoke tests never
  * load it.
  */
-function blobStorage(): RunStorage {
+type BlobAuth = { token?: string };
+
+function blobStorage(auth: BlobAuth): RunStorage {
   const sdk = () => import('@vercel/blob');
 
   return {
     kind: 'blob',
     async readJson<T>(key: string) {
       const { get } = await sdk();
-      const res = await get(key, { access: 'private', useCache: false });
+      const res = await get(key, { ...auth, access: 'private', useCache: false });
       if (!res || res.statusCode !== 200) return null;
       return JSON.parse(await new Response(res.stream).text()) as T;
     },
     async writeJson(key, value) {
       const { put } = await sdk();
       await put(key, JSON.stringify(value), {
+        ...auth,
         access: 'private',
         allowOverwrite: true,
         addRandomSuffix: false,
@@ -125,7 +130,7 @@ function blobStorage(): RunStorage {
       const keys: string[] = [];
       let cursor: string | undefined;
       do {
-        const page = await list({ prefix, cursor, limit: 1000 });
+        const page = await list({ ...auth, prefix, cursor, limit: 1000 });
         keys.push(...page.blobs.map((b) => b.pathname));
         cursor = page.hasMore ? page.cursor : undefined;
       } while (cursor);
@@ -160,11 +165,34 @@ function serverless(): boolean {
 export const STORAGE_MISSING =
   'Preload has nowhere to keep runs on this deployment. In Vercel, open the project, go to Storage, create a private Blob store and connect it to this environment, then redeploy.';
 
+/*
+ * How a connected store shows up in the environment. The default is
+ * BLOB_READ_WRITE_TOKEN. A store connected with a custom prefix sets
+ * <PREFIX>_READ_WRITE_TOKEN instead, and newer connections may only set
+ * BLOB_STORE_ID and let the SDK use the deployment's OIDC token.
+ */
+function blobAuth(): BlobAuth | null {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (name.endsWith('_READ_WRITE_TOKEN') && value?.startsWith('vercel_blob_rw_')) return { token: value };
+  }
+  if (process.env.BLOB_STORE_ID) return {};
+  return null;
+}
+
+/** Names only, never values. Shown when no store is found, to say what the deployment sees. */
+export function storageEnvNames(): string[] {
+  return Object.keys(process.env)
+    .filter((n) => /BLOB|READ_WRITE_TOKEN|PRELOAD_RUN_DIR/.test(n))
+    .sort();
+}
+
 let storage: RunStorage | null = null;
 
 function pickStorage(): RunStorage {
   if (process.env.PRELOAD_RUN_DIR) return diskStorage(process.env.PRELOAD_RUN_DIR);
-  if (process.env.BLOB_READ_WRITE_TOKEN) return blobStorage();
+  const auth = blobAuth();
+  if (auth) return blobStorage(auth);
   if (serverless()) throw new Error(STORAGE_MISSING);
   return diskStorage(join(process.cwd(), '.runs'));
 }
