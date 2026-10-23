@@ -42,22 +42,42 @@ async function main() {
     process.exit(1);
   }
 
-  const form = new FormData();
-  form.append('title', title);
-  for (const name of names) {
-    const buf = await readFile(join(folder, name));
-    const type = MIME[extname(name).toLowerCase()] || 'application/octet-stream';
-    form.append('files', new File([buf], basename(name), { type }));
-  }
-
+  // Same order as the browser: an empty run, then one file per request,
+  // because a hosted function refuses a body over 4.5 MB.
   console.log(bold(`\nSTAGE 0  reading the files`));
-  const created = await (await fetch(`${BASE}/api/preload/run`, { method: 'POST', body: form })).json();
+  const created = await (
+    await fetch(`${BASE}/api/preload/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title }),
+    })
+  ).json();
   if (created.error) {
     console.error(red(created.error));
     process.exit(1);
   }
 
-  const model0 = created.model;
+  let model0 = created.model;
+  for (const name of names) {
+    const buf = await readFile(join(folder, name));
+    const type = MIME[extname(name).toLowerCase()] || 'application/octet-stream';
+    const form = new FormData();
+    form.append('file', new File([buf], basename(name), { type }));
+    const up = await fetch(`${BASE}/api/preload/run/${model0.run.id}/files`, { method: 'POST', body: form });
+    const text = await up.text();
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { error: `${up.status} ${text.slice(0, 120)}` };
+    }
+    if (body.error) {
+      console.log(`   ${red('FAILED')}  ${name}  ${red(body.error)}`);
+      continue;
+    }
+    model0 = body.model;
+  }
+
   for (const s of model0.sources) {
     const state = s.parse === 'OK' ? green(`${s.chunkCount} sections`) : red(s.parseNote);
     console.log(`   ${s.parse === 'OK' ? green('OK') : red(s.parse)}  ${s.role.padEnd(10)} ${s.name}  ${state}`);

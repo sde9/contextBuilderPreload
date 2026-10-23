@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 import { usePreload } from '@/lib/preloadStore';
 import { ROLE_LABEL, SOURCE_ROLES, type SourceRole } from '@/lib/types';
+import { UPLOAD_LIMIT } from '@/lib/limits';
 
 /*
  * Screen 1. Files in, and one sentence about the project.
@@ -23,6 +24,7 @@ export default function Intake() {
   const build = usePreload((s) => s.build);
   const act = usePreload((s) => s.act);
   const reset = usePreload((s) => s.reset);
+  const uploading = usePreload((s) => s.uploading);
 
   const [title, setTitle] = useState('');
   const [over, setOver] = useState(false);
@@ -58,8 +60,14 @@ export default function Intake() {
             if (e.key === 'Enter' || e.key === ' ') input.current?.click();
           }}
         >
-          <strong>{busy ? 'Reading the files…' : 'Drop the project files here'}</strong>
-          <span>PDF · DOCX · MD · TXT · CSV · transcripts</span>
+          <strong>
+            {busy
+              ? uploading.total > 1
+                ? `Reading the files… ${uploading.done} of ${uploading.total}`
+                : 'Reading the files…'
+              : 'Drop the project files here'}
+          </strong>
+          <span>PDF · DOCX · MD · TXT · CSV · transcripts · up to {UPLOAD_LIMIT} each</span>
           <input
             ref={input}
             type="file"

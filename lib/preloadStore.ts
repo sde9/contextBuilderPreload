@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import type { Blocked, Model, SourceRole } from './types';
 import { noBlocks, normaliseModel } from './types';
 import type { Level } from './cluster';
+import { MAX_FILES, MAX_UPLOAD_BYTES, UPLOAD_LIMIT, megabytes } from './limits';
 
 /*
  * The preload client.
@@ -24,12 +25,16 @@ type State = {
   /** Every note the run has produced, newest last. The progress screen. */
   notes: string[];
   blocked: Blocked;
+  /** Files sent so far while a drop is being read. Zero total when idle. */
+  uploading: { done: number; total: number };
 
   level: Level;
   openClusters: string[];
   selectedSources: string[];
   selectedConcept: string;
 
+  /** Ask the server whether it has somewhere to keep runs. */
+  checkHealth: () => Promise<void>;
   create: (files: File[], title: string) => Promise<void>;
   open: (runId: string) => Promise<void>;
   setRole: (sourceId: string, role: SourceRole) => Promise<void>;
@@ -50,6 +55,23 @@ type State = {
   download: () => void;
 };
 
+/*
+ * Read a response that should be JSON and might not be. A hosted function
+ * that times out or gets a body that is too large answers with a plain-text
+ * or HTML page from the platform, and res.json() would hide that behind
+ * "Unexpected token".
+ */
+async function readBody(res: Response): Promise<{ error?: string } & Record<string, any>> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (res.status === 413) return { error: `The server refused a file over ${UPLOAD_LIMIT}.` };
+    if (res.status === 504) return { error: 'The server took too long on this step. Press Resume to try it again.' };
+    return { error: `The server answered ${res.status}: ${text.slice(0, 160)}` };
+  }
+}
+
 function saveTextFile(filename: string, mime: string, content: string): void {
   const blob = new Blob([content], { type: mime });
   const a = document.createElement('a');
@@ -66,33 +88,70 @@ export const usePreload = create<State>((set, get) => ({
   error: '',
   notes: [],
   blocked: noBlocks(),
+  uploading: { done: 0, total: 0 },
 
   level: 1,
   openClusters: [],
   selectedSources: [],
   selectedConcept: '',
 
+  checkHealth: async () => {
+    try {
+      const res = await fetch('/api/preload/health');
+      const body = await readBody(res);
+      if (!res.ok || !body.ok) set({ error: body.error || 'The server cannot keep runs right now.' });
+    } catch {
+      // Offline or the route is missing. The first upload will say what is wrong.
+    }
+  },
+
+  /*
+   * A new run, then its files one by one. One per request because a hosted
+   * function refuses a body over 4.5 MB. In turn, not side by side, because
+   * each upload adds its file to the run the previous one saved.
+   */
   create: async (files, title) => {
     if (!files.length || get().busy) return;
-    set({ busy: true, error: '', notes: [] });
+
+    const tooBig = files.filter((f) => f.size > MAX_UPLOAD_BYTES);
+    const toSend = files.filter((f) => f.size <= MAX_UPLOAD_BYTES).slice(0, MAX_FILES);
+    const skipped: string[] = [
+      ...tooBig.map((f) => `${f.name} (${megabytes(f.size)}, over the ${UPLOAD_LIMIT} limit)`),
+      ...files.filter((f) => f.size <= MAX_UPLOAD_BYTES).slice(MAX_FILES).map((f) => `${f.name} (over ${MAX_FILES} files)`),
+    ];
+
+    set({ busy: true, error: '', notes: [], uploading: { done: 0, total: toSend.length } });
     try {
-      const form = new FormData();
-      form.append('title', title);
-      for (const f of files) form.append('files', f);
+      if (!toSend.length) throw new Error(`Nothing to upload. Skipped: ${skipped.join('; ')}.`);
 
-      const res = await fetch('/api/preload/run', { method: 'POST', body: form });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || 'Could not read the files');
+      const res = await fetch('/api/preload/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+      const body = await readBody(res);
+      if (!res.ok) throw new Error(body.error || 'Could not start a run');
 
+      const runId: string = body.model.run.id;
       set({ model: normaliseModel(body.model), screen: 'intake' });
       // Keep the run id in the address bar so a reload comes back here.
-      if (typeof window !== 'undefined' && body.model?.run?.id) {
-        window.history.replaceState(null, '', `?run=${body.model.run.id}`);
+      if (typeof window !== 'undefined') window.history.replaceState(null, '', `?run=${runId}`);
+
+      for (const [i, file] of toSend.entries()) {
+        const form = new FormData();
+        form.append('file', file);
+        const up = await fetch(`/api/preload/run/${runId}/files`, { method: 'POST', body: form });
+        const upBody = await readBody(up);
+        if (up.ok) set({ model: normaliseModel(upBody.model) });
+        else skipped.push(`${file.name} (${upBody.error || `error ${up.status}`})`);
+        set({ uploading: { done: i + 1, total: toSend.length } });
       }
+
+      if (skipped.length) set({ error: `Not added: ${skipped.join('; ')}.` });
     } catch (e) {
       set({ error: (e as Error).message });
     } finally {
-      set({ busy: false });
+      set({ busy: false, uploading: { done: 0, total: 0 } });
     }
   },
 
@@ -100,7 +159,7 @@ export const usePreload = create<State>((set, get) => ({
     set({ busy: true, error: '' });
     try {
       const res = await fetch(`/api/preload/run/${runId}`);
-      const body = await res.json();
+      const body = await readBody(res);
       if (!res.ok) throw new Error(body.error || 'Could not open that run');
       const model = normaliseModel(body.model);
       const stage = model.run?.stage ?? 'IDLE';
@@ -149,7 +208,7 @@ export const usePreload = create<State>((set, get) => ({
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ runId }),
         });
-        const body = await res.json();
+        const body = await readBody(res);
         if (!res.ok) throw new Error(body.error || 'A step failed');
 
         const next = normaliseModel(body.model);
@@ -186,7 +245,7 @@ export const usePreload = create<State>((set, get) => ({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ runId: model.run.id, resume: true }),
       });
-      const body = await res.json();
+      const body = await readBody(res);
       if (!res.ok) throw new Error(body.error || 'Could not resume');
       set({ model: normaliseModel(body.model) });
     } catch (e) {
@@ -207,7 +266,7 @@ export const usePreload = create<State>((set, get) => ({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ runId: model.run.id, action }),
       });
-      const body = await res.json();
+      const body = await readBody(res);
       if (!res.ok) throw new Error(body.error || 'That did not go through');
       set({ model: normaliseModel(body.model) });
     } catch (e) {

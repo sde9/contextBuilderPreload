@@ -39,7 +39,7 @@ between them.
 Check the core with no key and no network:
 
 ```bash
-npm run smoke:all     # 20 real-time assertions + 101 preload assertions
+npm run smoke:all     # real-time, preload, and the preload server end to end
 ```
 
 Run that after touching `reducer.ts`, `merge.ts`, `cluster.ts` or `chunk.ts`. It
@@ -112,8 +112,9 @@ drop files
 ```
 
 Each stage is one HTTP request, so the progress screen reports things that
-actually happened rather than animating a bar. A run lives on disk under
-`.runs/`, so a closed laptop does not lose it and `?run=<id>` reopens it.
+actually happened rather than animating a bar. A run lives in shared storage
+(the project's private Vercel Blob store when deployed, `.runs/` locally), so a
+closed laptop does not lose it and `?run=<id>` reopens it from any device.
 
 ### The merge
 
@@ -153,17 +154,23 @@ lib/
   cluster.ts      areas, tiers, crossing check, coverage                 PURE
   parse.ts        pdf/docx/text to plain text                     server only
   pipeline.ts     the five stages                                 server only
-  runStore.ts     a run on disk                                   server only
+  runStore.ts     a run in Blob or on disk, one key per piece      server only
+  intake.ts       stage 0 for one uploaded file                   server only
+  limits.ts       upload limits, shared by browser and server
   preloadStore.ts the preload client
 app/
   preload/page.tsx
-  api/preload/run    stage 0, and reopening a run
-  api/preload/step   one unit of work
+  api/preload/run              a new empty run, and the list of runs
+  api/preload/run/[id]         reopen a run
+  api/preload/run/[id]/files   stage 0, one file per request
+  api/preload/step             one unit of work
+  api/preload/health           is there a store? ?probe=1 writes and reads one
   api/preload/act    confirm, reject, split, resolve, role
 components/preload/
   Intake  RunProgress  SourceRail  EvidencePanel  PreloadCanvas  ClusterNode
 scripts/
   smoke-preload.ts    101 assertions, offline
+  smoke-store.ts      every preload route, a fake model, memory and disk stores
   run-preload.mjs     drive a whole run from the command line
 sample-documents/     four files with one deliberate contradiction
 ```
@@ -204,28 +211,47 @@ this machine only:
 | `MERGE_MODEL` | defaults to `PROPOSE_MODEL`. The merge is where quality shows |
 | `CLUSTER_MODEL` | defaults to `PROPOSE_MODEL` |
 | `PROPOSAL_CAP` | orange nodes per pass, default 8 in preload |
-| `PRELOAD_RUN_DIR` | where runs are stored. Default `.runs` locally, `/tmp/preload-runs` on serverless |
+| `BLOB_READ_WRITE_TOKEN` | set by Vercel when a Blob store is connected to the project. Runs go there |
+| `PRELOAD_RUN_DIR` | keep runs in this folder instead. Default `.runs` when running locally |
 
 ---
 
 ## Deploying
 
-It runs on Vercel with no changes, and two things are worth knowing first.
+It runs on Vercel, and needs two things set up in the project first.
 
 **Set the environment variables in the project settings.** `.env.local` is not
 in this repository, so a fresh deployment has no key. At minimum:
 `LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `EXTRACT_MODEL`, `PROPOSE_MODEL`.
 
-**Runs are only as durable as the instance.** A serverless deployment has a
-read-only filesystem apart from `/tmp`, so that is where runs go. `/tmp` belongs
-to one instance and is wiped on a cold start. Driving a run step after step
-keeps hitting the same warm instance and finishes normally, but a long pause in
-the middle can lose it, and the map will not reopen tomorrow from its `?run=`
-link.
+**Connect a private Blob store.** Storage → Create → Blob, access Private,
+region iad1, connected to Production, Preview and Development. Vercel then sets
+`BLOB_READ_WRITE_TOKEN` and runs go there. Without a store a deployment refuses
+to start a run and says what to connect, because the only disk a function has
+is its own temporary one. Each route is a separate function with its own
+`/tmp`, so a run saved by the upload was never visible to the step that reads
+it; that is why Preload did not work on Vercel before 24 October 2026.
+`/api/preload/health?probe=1` writes one small object and reads it back.
 
-For a demo that is fine. To make R4 true in a deployment, point
-`PRELOAD_RUN_DIR` at a mounted volume, or replace the four functions in
-`runStore.ts` with a real store. They are the only place that touches a disk.
+Layout in the store, the same on disk:
+
+```
+runs/<id>/run.json               the model without chunk text
+runs/<id>/chunks/<sourceId>.json one file's sections, written once at upload
+runs/<id>/docs/<sourceId>.json   one file's own map from stage 1
+```
+
+Blobs are private and read with `useCache: false`, so a step always sees what
+the previous request wrote. The uploaded files themselves are not kept, only
+their text, split into sections. Nothing deletes a run yet: the text of every
+uploaded document stays in the store until someone removes it in the Vercel
+dashboard. Agree retention with the product owner before real client
+documents go in (OQ-07).
+
+**Uploads are one file per request, 4 MB each.** Vercel refuses a function
+request body over 4.5 MB before any code runs, so the browser creates the run
+first and then sends the files one by one. A bigger file is named on screen and
+skipped. The limit is the same locally.
 
 ---
 

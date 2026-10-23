@@ -26,8 +26,14 @@ function Preload() {
   const open = usePreload((s) => s.open);
   const reset = usePreload((s) => s.reset);
   const download = usePreload((s) => s.download);
+  const checkHealth = usePreload((s) => s.checkHealth);
   const params = useSearchParams();
   const runId = params.get('run');
+
+  // A deployment with no run store says so before any file goes up.
+  useEffect(() => {
+    void checkHealth();
+  }, [checkHealth]);
 
   // R4. A reload comes back to the same run rather than an empty screen.
   useEffect(() => {

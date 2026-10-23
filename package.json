@@ -1,6 +1,6 @@
 {
   "name": "enabler-context-builder-preload",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "scripts": {
     "predev": "[ -f .vercel/project.json ] && npm run env:pull --silent </dev/null || echo 'Vercel env not pulled, using the .env files already here. Run npm run env:link once.'",
@@ -12,11 +12,13 @@
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:preload": "tsx scripts/smoke-preload.ts",
-    "smoke:all": "tsx scripts/smoke.ts && tsx scripts/smoke-preload.ts",
+    "smoke:store": "tsx scripts/smoke-store.ts",
+    "smoke:all": "tsx scripts/smoke.ts && tsx scripts/smoke-preload.ts && tsx scripts/smoke-store.ts",
     "preload": "node scripts/run-preload.mjs"
   },
   "dependencies": {
     "@types/dagre": "^0.7.54",
+    "@vercel/blob": "2.8.0",
     "@xyflow/react": "^12.11.0",
     "dagre": "^0.8.5",
     "html-to-image": "1.11.11",

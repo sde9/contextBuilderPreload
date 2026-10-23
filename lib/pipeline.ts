@@ -24,7 +24,7 @@ import {
   proposeUser,
 } from './prompts';
 import { structured } from './llm';
-import { loadDocs, saveDocs } from './runStore';
+import { loadDocs, saveDoc } from './runStore';
 
 /*
  * The stages, server side. One call to `step` does one unit of work and
@@ -155,7 +155,7 @@ async function readSource(model: Model, source: Source): Promise<{ doc: Model; b
 // ------------------------------------------------------------------ stage 2
 
 async function mergeAll(model: Model): Promise<{ model: Model; note: string; blocked: Blocked }> {
-  const docs = await loadDocs(model.run!.id);
+  const docs = await loadDocs(model.run!.id, model.sources.map((s) => s.id));
   const combined = combineSourceModels(docs.length ? docs : [model], model.sources);
   let working = combined.model;
   let blocked = combined.blocked;
@@ -331,15 +331,16 @@ export async function step(model: Model): Promise<StepResult> {
           model: stamp(model, {
             stage: 'FAILED',
             failedStage: 'READING',
-            failedWhy: `Every request for ${next.name} failed. Check the key and the model name in .env.local, then resume.`,
+            failedWhy: `Every request for ${next.name} failed. Check ANTHROPIC_API_KEY and EXTRACT_MODEL in the Vercel project settings (or .env.local when running locally), then resume.`,
           }),
           note: `${next.name}: could not be read.`,
           blocked,
         };
       }
 
-      const docs = await loadDocs(model.run!.id);
-      await saveDocs(model.run!.id, [...docs, doc]);
+      // One object per file. A retried step overwrites its own map and never
+      // duplicates it, which the old single array of maps could.
+      await saveDoc(model.run!.id, doc);
 
       // -1 means "read, found nothing", which is different from 0, "not read
       // yet". Without that difference the stage picks the same file forever.
