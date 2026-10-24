@@ -92,7 +92,7 @@ when it is called without options.
 ```
 drop files
   │
-  ├─ stage 0  PARSING       text out of pdf/docx/md/txt/csv, split on the
+  ├─ stage 0  PARSING       text out of pdf/docx/rtf/md/txt/csv, split on the
   │                         document's own seams. Locators fall out of the
   │                         split: "p.18", "§ Pricing", "00:14:22".
   │                         No model call. Nothing is spent yet.
@@ -152,7 +152,7 @@ lib/
   chunk.ts        splitting on document seams, locators, role guessing   PURE
   merge.ts        shortlist, applyMerge, split, resolveContest           PURE
   cluster.ts      areas, tiers, crossing check, coverage                 PURE
-  parse.ts        pdf/docx/text to plain text                     server only
+  parse.ts        pdf/docx/rtf/text to text                       server only
   pipeline.ts     the five stages                                 server only
   runStore.ts     a run in Blob or on disk, one key per piece      server only
   intake.ts       stage 0 for one uploaded file                   server only

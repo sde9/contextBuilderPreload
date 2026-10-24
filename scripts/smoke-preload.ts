@@ -26,6 +26,7 @@ import {
 } from '../lib/merge';
 import { applyClusters, assignTiers, clusterEdges, conceptsAtLevel, coverage, crossingRatio } from '../lib/cluster';
 import { chunkText, chooseStrategy, guessRole, PAGE_BREAK } from '../lib/chunk';
+import { looksLikeRtf, rtfToText } from '../lib/parse';
 import { emptyModel, newId, type Model, type Source } from '../lib/types';
 import type { ExtractPatch, MergePatch, ClusterPatch } from '../lib/schema';
 
@@ -99,6 +100,49 @@ check('nothing recognisable stays UNKNOWN', guessRole('untitled.txt', 'hello the
 // ==========================================================================
 // building two document maps the way stage 1 would
 // ==========================================================================
+
+section('RTF is read as text, not as markup');
+
+/** Test RTF is written with | for the backslash, so it reads as it would in the file. */
+const rtf = (src: string) => rtfToText(src.replaceAll('|', String.fromCharCode(92)));
+
+const wordRtf = rtf(
+  "{|rtf1|ansi|ansicpg1252|uc1{|fonttbl{|f0|froman Times New Roman;}{|f3 Symbol;}}{|colortbl;|red0|green0|blue0;}" +
+    "{|stylesheet{|ql Normal;}}{|*|rsidtbl |rsid5833091}{|*|generator Microsoft Word;}{|info{|author Someone}}" +
+    "{|*|themedata 504b0304140006000800}{|header |pard ICL header|par }" +
+    "|pard|plain |ltrpar|qj |li0|ri0|sa160|sl278|slmult1|widctlpar|wrapdefault " +
+    "{|rtlch|fcs1 |ab|af0 |ltrch|fcs0 |b|insrsid5833091|charrsid16592372 AI Code of Honour|par }" +
+    "{|insrsid5833091 I promise to adhere to the code of honour.}{|super|chftn {|footnote |pard {|super|chftn } See the policy.}}|par " +
+    "{|listtext|pard|plain |f3 |'b7|tab}Seek clarification from instructors.|par " +
+    "{|field{|*|fldinst {HYPERLINK \"https://example.org\" }}{|fldrslt {Canvas}}} is the submission method|emdash always.|par " +
+    "|u1057|'d1|u1090|'f2|u1091|'f3|u1076|'e4|u1077|'e5|u1085|'ed|u1090|'f2 Caf|'e9 50|'25 off|par " +
+    "{|pict|pngblip 89504e470d0a}After the picture.|par }"
+);
+const nl = String.fromCharCode(10);
+check('a Word RTF reads as OK', wordRtf.status === 'OK', wordRtf.note);
+check('no control words survive', !/[|{}]/.test(wordRtf.text) && !wordRtf.text.includes(String.fromCharCode(92)), wordRtf.text.slice(0, 120));
+check('the body text is all there', ['AI Code of Honour', 'I promise to adhere to the code of honour.', 'Seek clarification from instructors.', 'After the picture.'].every((t) => wordRtf.text.includes(t)));
+check('font, colour, style, theme and info tables are dropped', !/Times New Roman|Normal|Microsoft Word|Someone|504b/.test(wordRtf.text));
+check('headers are dropped, as the DOCX reader drops them', !wordRtf.text.includes('ICL header'));
+check('a link keeps its text and loses its address', wordRtf.text.includes('Canvas is the submission method') && !wordRtf.text.includes('example.org'));
+check('Unicode escapes decode and their fallback bytes are skipped', wordRtf.text.includes(String.fromCharCode(1057, 1090, 1091, 1076, 1077, 1085, 1090) + ' Caf'));
+check('hex bytes decode through the codepage', wordRtf.text.includes('Caf' + String.fromCharCode(233) + ' 50% off'));
+check('a footnote moves to the end with its mark', wordRtf.text.includes('honour. [1]') && wordRtf.text.trimEnd().endsWith('[1] See the policy.'));
+check('each paragraph is its own block for the chunker', wordRtf.text.split(nl + nl).length >= 6);
+check('a picture leaves no hex behind', !/89504e/.test(wordRtf.text));
+
+const textEdit = rtf(
+  "{|rtf1|ansi|ansicpg1252|cocoartf2822" + nl + "|cocoatextscaling0|cocoaplatform0{|fonttbl|f0|fswiss|fcharset0 Helvetica;}" + nl +
+    "{|colortbl;|red255|green255|blue255;}" + nl + "{|*|expandedcolortbl;;}" + nl +
+    "|pard|tx566|pardirnatural|partightenfactor0" + nl + nl + "|f0|fs24 |cf0 First line|" + nl + "Second |{line|}|" + nl +
+    "|uc0|u1055 |u1088 |u1080 |u1074 |u1077 |u1090 }"
+);
+check('a TextEdit RTF reads as OK', textEdit.status === 'OK', textEdit.note);
+check('TextEdit line breaks become paragraphs', textEdit.text.startsWith('First line' + nl + nl + 'Second {line}'), JSON.stringify(textEdit.text));
+check('uc0 means no fallback to skip', textEdit.text.endsWith(String.fromCharCode(1055, 1088, 1080, 1074, 1077, 1090)), JSON.stringify(textEdit.text));
+check('a Symbol-font bullet becomes a real bullet', rtf("{|rtf1|ansi{|listtext |u61623|'b7|tab}Debug code|par }").text.startsWith(String.fromCharCode(0x2022) + String.fromCharCode(9) + 'Debug code'));
+check('an RTF file is recognised by its first bytes', looksLikeRtf(Buffer.from('{' + String.fromCharCode(92) + 'rtf1 x}')) && !looksLikeRtf(Buffer.from('# Scope')));
+check('an RTF with no words is EMPTY, not OK', rtf('{|rtf1|ansi{|fonttbl{|f0 Arial;}}|par }').status === 'EMPTY');
 
 section('stage 1: one map per document');
 

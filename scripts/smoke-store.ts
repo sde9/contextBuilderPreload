@@ -14,7 +14,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { memoryStorage, useStorage, STORAGE_MISSING, RUN_MISSING, storageKind } from '../lib/runStore';
+import { memoryStorage, useStorage, STORAGE_MISSING, RUN_MISSING, storageKind, loadRunFull } from '../lib/runStore';
 import { MAX_UPLOAD_BYTES } from '../lib/limits';
 import * as runRoute from '../app/api/preload/run/route';
 import * as filesRoute from '../app/api/preload/run/[id]/files/route';
@@ -138,6 +138,16 @@ async function fullRun(label: string) {
 
   const big = await body(await filesRoute.POST(upload('huge.txt', 'x'.repeat(MAX_UPLOAD_BYTES + 10), 'text/plain'), params(id)));
   check('a file over the limit is named and skipped', big.model.sources.at(-1).parse === 'FAILED' && /limit/.test(big.model.sources.at(-1).parseNote));
+
+  // A .rtf is plain ASCII, so it once went in through the unknown-file path
+  // and every control word reached the map. Its own run, so the build below
+  // keeps the four sample files.
+  const rtfRun = await body(await runRoute.POST(json({ title: 'RTF' })));
+  const rtfSrc = ['{|rtf1|ansi|ansicpg1252{|fonttbl{|f0 Times;}}{|*|generator Word;}', '|pard|plain {|insrsid1 AI Code of Honour}|par ', 'I promise to follow the code of honour.|par }'].join('').replaceAll('|', String.fromCharCode(92));
+  const rtfUp = await body(await filesRoute.POST(upload('Cover V2.rtf', rtfSrc, 'text/rtf'), params(rtfRun.model.run.id)));
+  check('a .rtf upload is read', rtfUp.model?.sources.at(-1)?.parse === 'OK', rtfUp.model?.sources.at(-1)?.parseNote);
+  const rtfText = ((await loadRunFull(rtfRun.model.run.id))?.chunks ?? []).map((c) => c.text).join(' ');
+  check('its sections hold the words, not the RTF codes', rtfText.includes('I promise to follow the code of honour.') && !rtfText.includes(String.fromCharCode(92)) && !rtfText.includes('Times'), rtfText.slice(0, 80));
 
   const reopened = await body(await runIdRoute.GET(new Request('http://local'), params(id)));
   check('another request reopens the run by id', reopened.status === 200 && reopened.model.run.id === id);

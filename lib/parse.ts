@@ -105,6 +105,245 @@ function docxToText(buf: Buffer): ParseResult {
   return ok(text);
 }
 
+// ---------------------------------------------------------------- rtf
+
+/*
+ * RTF is plain ASCII, so it used to slip through the unknown-extension path
+ * as text. Every control word then went to the model and into the quotes, and
+ * the evidence panel showed `\par }\pard \ltrpar\qj` instead of a sentence
+ * (seen 25 Oct 2026 on a Word-saved .rtf). Read it properly: walk the groups,
+ * keep the text, drop font tables, styles, pictures and metadata.
+ *
+ * Word and TextEdit both write enough of the spec for this to stay small.
+ * Footnotes are kept, moved to the end with a [n] mark where they were.
+ * Headers and footers are dropped, as the DOCX reader drops them.
+ */
+
+/** Groups whose content is never text a person wrote in the body. */
+const RTF_SKIP = new Set([
+  'fonttbl', 'colortbl', 'stylesheet', 'info', 'pict', 'object', 'listtable', 'listoverridetable',
+  'rsidtbl', 'generator', 'xmlnstbl', 'themedata', 'colorschememapping', 'latentstyles', 'datastore',
+  'fldinst', 'header', 'headerl', 'headerr', 'headerf', 'footer', 'footerl', 'footerr', 'footerf',
+  'filetbl', 'revtbl', 'pgdsctbl', 'xe', 'tc', 'txe', 'private', 'nonshppict', 'shpinst',
+  'bkmkstart', 'bkmkend', 'userprops', 'docvar', 'template', 'expandedcolortbl', 'listpicture',
+  'annotation', 'atnid', 'atnauthor', 'atnref', 'atntime', 'atrfstart', 'atrfend', 'mmathPr',
+]);
+
+const BULLET = '\u2022';
+
+/** Control words that stand for a character or a break. */
+const RTF_CHAR: Record<string, string> = {
+  par: '\n\n',
+  sect: '\n\n',
+  page: '\n\n',
+  line: '\n',
+  tab: '\t',
+  cell: '\t',
+  nestcell: '\t',
+  row: '\n',
+  nestrow: '\n',
+  emdash: '\u2014',
+  endash: '\u2013',
+  bullet: '\u2022',
+  lquote: '\u2018',
+  rquote: '\u2019',
+  ldblquote: '\u201c',
+  rdblquote: '\u201d',
+  emspace: ' ',
+  enspace: ' ',
+  qmspace: ' ',
+};
+
+const CODEPAGE_LABEL: Record<number, string> = {
+  866: 'ibm866',
+  932: 'shift_jis',
+  936: 'gbk',
+  949: 'euc-kr',
+  950: 'big5',
+  10000: 'macintosh',
+};
+
+function decoderFor(codepage: number): TextDecoder {
+  for (const label of [CODEPAGE_LABEL[codepage], `windows-${codepage}`]) {
+    if (!label) continue;
+    try {
+      return new TextDecoder(label);
+    } catch {
+      // Unknown label in this runtime. Try the next one.
+    }
+  }
+  return new TextDecoder('windows-1252');
+}
+
+export function looksLikeRtf(buf: Buffer): boolean {
+  return buf.subarray(0, 5).toString('latin1') === '{\\rtf';
+}
+
+/** Pure. Takes the file as a latin1 string, so every byte maps to one char. */
+export function rtfToText(src: string): ParseResult {
+  type Frame = { skip: boolean; uc: number; note: number };
+  const stack: Frame[] = [];
+  let frame: Frame = { skip: false, uc: 1, note: -1 };
+
+  let body = '';
+  const notes: string[] = [];
+  let bytes: number[] = [];
+  let decoder = decoderFor(1252);
+  /** Fallback characters still to drop after a \uN. */
+  let fallback = 0;
+
+  const write = (s: string) => {
+    if (frame.skip || !s) return;
+    if (frame.note >= 0) notes[frame.note] += s;
+    else body += s;
+  };
+  const flushBytes = () => {
+    if (!bytes.length) return;
+    const s = decoder.decode(Uint8Array.from(bytes));
+    bytes = [];
+    write(s);
+  };
+  const put = (s: string) => {
+    flushBytes();
+    write(s);
+  };
+
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+
+    if (ch === '{') {
+      flushBytes();
+      stack.push(frame);
+      frame = { ...frame };
+      fallback = 0;
+      i++;
+      continue;
+    }
+    if (ch === '}') {
+      flushBytes();
+      frame = stack.pop() ?? frame;
+      fallback = 0;
+      i++;
+      continue;
+    }
+    if (ch === '\r' || ch === '\n') {
+      i++;
+      continue;
+    }
+
+    if (ch !== '\\') {
+      i++;
+      if (fallback > 0) {
+        fallback--;
+        continue;
+      }
+      const code = ch.charCodeAt(0);
+      // A writer that puts 8-bit bytes straight in the file means the codepage.
+      if (code > 127) {
+        if (!frame.skip) bytes.push(code);
+      } else {
+        put(ch);
+      }
+      continue;
+    }
+
+    // A backslash: control symbol, hex byte or control word.
+    const next = src[i + 1];
+    if (next === undefined) break;
+
+    if (next === "'") {
+      const byte = parseInt(src.slice(i + 2, i + 4), 16);
+      i += 4;
+      if (fallback > 0) {
+        fallback--;
+        continue;
+      }
+      if (!Number.isNaN(byte) && !frame.skip) bytes.push(byte);
+      continue;
+    }
+
+    if (!/[a-zA-Z]/.test(next)) {
+      i += 2;
+      if (next === '*') {
+        frame.skip = true;
+        continue;
+      }
+      if (fallback > 0) {
+        fallback--;
+        continue;
+      }
+      if (next === '\\' || next === '{' || next === '}') put(next);
+      else if (next === '~') put(' ');
+      else if (next === '_') put('-');
+      else if (next === '\n' || next === '\r') put('\n\n');
+      // \- optional hyphen, \: index subentry, \| formula: nothing to show.
+      continue;
+    }
+
+    const m = /^\\([a-zA-Z]+)(-?\d+)? ?/.exec(src.slice(i, i + 48));
+    if (!m) {
+      i++;
+      continue;
+    }
+    i += m[0].length;
+    const word = m[1];
+    const num = m[2] === undefined ? null : Number(m[2]);
+    fallback = 0;
+
+    if (word === 'bin') {
+      // Raw binary follows. It is never text.
+      i += Math.max(0, num ?? 0);
+      continue;
+    }
+    if (RTF_SKIP.has(word)) {
+      frame.skip = true;
+      continue;
+    }
+    if (word === 'footnote') {
+      if (frame.skip) continue;
+      notes.push('');
+      put(` [${notes.length}]`);
+      frame.note = notes.length - 1;
+      continue;
+    }
+    if (word === 'ansicpg' && num !== null) {
+      flushBytes();
+      decoder = decoderFor(num);
+      continue;
+    }
+    if (word === 'uc' && num !== null) {
+      frame.uc = Math.max(0, num);
+      continue;
+    }
+    if (word === 'u' && num !== null) {
+      const code = num < 0 ? num + 65536 : num;
+      // Symbol and Wingdings bullets arrive in the private-use block
+      // (LibreOffice writes \u61623 for the usual list dot) and show as
+      // empty boxes anywhere else.
+      put(code >= 0xf000 && code <= 0xf0ff ? BULLET : String.fromCharCode(code));
+      fallback = frame.uc;
+      continue;
+    }
+    const mapped = RTF_CHAR[word];
+    if (mapped !== undefined) put(mapped);
+  }
+  flushBytes();
+
+  let text = body;
+  if (notes.some((n) => n.trim())) {
+    text += '\n\nFootnotes\n\n' + notes.map((n, k) => `[${k + 1}] ${n.trim()}`).join('\n\n');
+  }
+
+  return ok(
+    text
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n +/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+  );
+}
+
 // ---------------------------------------------------------------- pdf
 
 async function pdfToText(buf: Buffer): Promise<ParseResult> {
@@ -141,6 +380,9 @@ async function pdfToText(buf: Buffer): Promise<ParseResult> {
 
 export async function parseFile(name: string, mime: string, buf: Buffer): Promise<ParseResult> {
   try {
+    // Before the text check: browsers send .rtf as text/rtf, and an old .doc
+    // is often RTF under the wrong name.
+    if (/\.rtf$/i.test(name) || /\brtf\b/i.test(mime) || looksLikeRtf(buf)) return rtfToText(buf.toString('latin1'));
     if (/\.docx$/i.test(name) || mime.includes('wordprocessingml')) return docxToText(buf);
     if (/\.pdf$/i.test(name) || mime === 'application/pdf') return pdfToText(buf);
     if (TEXT_EXT.test(name) || mime.startsWith('text/') || mime === 'application/json') {

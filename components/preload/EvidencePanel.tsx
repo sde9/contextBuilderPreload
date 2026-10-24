@@ -1,7 +1,32 @@
 'use client';
 
+import { useState } from 'react';
 import { usePreload } from '@/lib/preloadStore';
 import { ROLE_LABEL } from '@/lib/types';
+
+const SHORT = 420;
+
+/**
+ * A quote is the whole section the concept was read from, up to 2400
+ * characters. Show the start, and the rest when the person asks for it.
+ * The text used to be cut at 420 with no way to read on.
+ */
+function SectionText({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > SHORT + 80;
+  const space = text.lastIndexOf(' ', SHORT);
+  const shown = !long || open ? text : `${text.slice(0, space > SHORT - 120 ? space : SHORT)}…`;
+  return (
+    <>
+      <blockquote>{shown}</blockquote>
+      {long && (
+        <button className="quote-more" onClick={() => setOpen(!open)}>
+          {open ? 'Show less' : 'Show the whole section'}
+        </button>
+      )}
+    </>
+  );
+}
 
 /*
  * The right panel. What a node is, and where it came from.
@@ -67,7 +92,7 @@ export default function EvidencePanel() {
                 <div className="quote-meta">
                   {nameOf(r.sourceId)} · {quote?.locator ?? '—'} · {roleOf(r.sourceId)}
                 </div>
-                <blockquote>{quote?.quote ?? r.summary}</blockquote>
+                <SectionText text={quote?.quote ?? r.summary} />
                 <div className="quote-label">reads as: {r.label}</div>
               </div>
             );
@@ -88,7 +113,7 @@ export default function EvidencePanel() {
               <div className="quote-meta">
                 {nameOf(e.sourceId)} · {e.locator} · {roleOf(e.sourceId)}
               </div>
-              <blockquote>{e.quote.length > 420 ? `${e.quote.slice(0, 420)}…` : e.quote}</blockquote>
+              <SectionText text={e.quote} />
             </div>
           ))}
           {statements.map((s) => (

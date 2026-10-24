@@ -67,14 +67,14 @@ export default function Intake() {
                 : 'Reading the files…'
               : 'Drop the project files here'}
           </strong>
-          <span>PDF · DOCX · MD · TXT · CSV · transcripts · up to {UPLOAD_LIMIT} each</span>
+          <span>PDF · DOCX · RTF · MD · TXT · CSV · transcripts · up to {UPLOAD_LIMIT} each</span>
           <input
             ref={input}
             type="file"
             multiple
             hidden
             onChange={(e) => take(e.target.files)}
-            accept=".pdf,.docx,.md,.markdown,.txt,.csv,.tsv,.json,.log,.srt,.vtt,.html,.xml,.yaml,.yml"
+            accept=".pdf,.docx,.rtf,.md,.markdown,.txt,.csv,.tsv,.json,.log,.srt,.vtt,.html,.xml,.yaml,.yml"
           />
         </div>
 

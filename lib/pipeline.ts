@@ -26,6 +26,9 @@ import {
 import { structured } from './llm';
 import { loadDocs, saveDoc } from './runStore';
 
+/** Chunks stop at 2400 characters; this only guards a single giant paragraph. */
+const QUOTE_CHARS = 4000;
+
 /*
  * The stages, server side. One call to `step` does one unit of work and
  * returns, which is what keeps the progress screen honest (R4, R11): the
@@ -135,7 +138,10 @@ async function readSource(model: Model, source: Source): Promise<{ doc: Model; b
   let blocked = noBlocks();
   for (const { chunk, patch } of patches) {
     if (!patch) continue;
-    const applied = applyExtract(doc, patch, chunk.text.slice(0, 1200), {
+    // The whole section, not its first 1200 characters: the evidence panel
+    // cuts it for display, and a concept from the second half of a section
+    // used to cite text that never mentioned it.
+    const applied = applyExtract(doc, patch, chunk.text.slice(0, QUOTE_CHARS), {
       chunkId: chunk.id,
       sourceId: source.id,
       locator: chunk.locator,

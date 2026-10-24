@@ -521,7 +521,8 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
 .quote { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; background: #fff; }
 .quote-contested { border-color: #fecaca; }
 .quote-meta { font-size: 10.5px; color: var(--muted); margin-bottom: 6px; }
-.quote blockquote { margin: 0; font-size: 13.5px; line-height: 1.5; font-style: italic; }
+.quote blockquote { margin: 0; font-size: 13.5px; line-height: 1.5; font-style: italic; white-space: pre-line; overflow-wrap: anywhere; }
+.quote-more { border: 0; background: none; padding: 6px 0 0; font-size: 11.5px; color: var(--muted); text-decoration: underline; cursor: pointer; }
 .quote-label { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 .ev-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .ev-actions button { font-size: 12px; padding: 5px 10px; }
