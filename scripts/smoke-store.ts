@@ -38,6 +38,29 @@ function section(title: string) {
 
 let calls: Record<string, number> = {};
 let failExtract = false;
+/** Extract calls whose text contains this fail, as an oversized section would. */
+let failOn = '';
+
+/** A plausible outline: one part per section (up to three), quoted from each section's first line. */
+function fakeOutline(user: string) {
+  const doc = /^DOCUMENT: (.+?) \(/m.exec(user)?.[1] ?? 'doc';
+  const sections = [...user.matchAll(/^\[(s\d+)\] [^\n]*\n([^\n]*)/gm)].map((m) => ({ id: m[1], first: m[2] }));
+  const sentence = (t: string) => (t.replace(/^#+\s*/, '').split(/(?<=\.)\s/)[0] ?? '').trim();
+  const parts = sections.slice(0, 3).map((sec, i) => ({
+    tempId: `p${i + 1}`,
+    label: `Part ${i + 1} of ${doc}`,
+    note: '',
+    kind: 'ENTITY',
+    quote: sentence(sec.first),
+    sectionIds: [sec.id],
+    pattern: 'STRUCTURE',
+  }));
+  return {
+    main: { label: `Main point of ${doc}`, note: '', kind: 'CLAIM', quote: '' },
+    parts,
+    links: parts.length > 1 ? [{ from: 'p1', to: 'p2', type: 'LEADS_TO', label: 'leads to', quote: '' }] : [],
+  };
+}
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -50,8 +73,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   calls[tool] = (calls[tool] ?? 0) + 1;
 
   let input2: unknown = {};
-  if (tool === 'extract_patch') {
+  if (tool === 'outline_patch') {
     if (failExtract) return new Response('{"error":"overloaded"}', { status: 529 });
+    input2 = fakeOutline(user);
+  } else if (tool === 'extract_patch') {
+    if (failExtract) return new Response('{"error":"overloaded"}', { status: 529 });
+    if (failOn && user.includes(failOn)) return new Response('{"error":"too long"}', { status: 400 });
     // Every document mentions a booking, so the merge has something to match.
     input2 = {
       concepts: [
@@ -178,6 +205,50 @@ async function fullRun(label: string) {
   check('the gap question came back', model.questions.some((q: any) => q.text === 'Who approves a refund?'));
   check('the map cites the documents', model.excerpts.length > 0);
 
+  section(`${label}: one document, read top down`);
+  calls = {};
+  const one = await body(await runRoute.POST(json({ title: 'Chapter' })));
+  const oneId: string = one.model.run.id;
+  const longPara = 'Owners read every condition through their own confidence and that shapes their use. '.repeat(8);
+  const chapterText = [
+    '# Chapter 5 Discussion',
+    '',
+    'The chapter reads the findings against four expectations.',
+    '',
+    '## 5.1 Benefit',
+    '',
+    'Benefit matters more than ease of use for owners who start.',
+    '',
+    '## 5.2 Policy',
+    '',
+    'Personal checking takes the place of a written policy for owners.',
+    '',
+    `FAILME ${longPara}`,
+    '',
+    longPara,
+  ].join('\n');
+  await filesRoute.POST(upload('Chapter 5.md', chapterText), params(oneId));
+  failOn = 'FAILME';
+  let oneModel: any = null;
+  const oneNotes: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    const res = await body(await stepRoute.POST(json({ runId: oneId })));
+    oneModel = res.model;
+    if (res.note) oneNotes.push(res.note);
+    if (oneModel.run.stage === 'READY' || oneModel.run.stage === 'FAILED') break;
+  }
+  failOn = '';
+  check('a one-document run reaches READY', oneModel.run.stage === 'READY', `${oneModel.run.failedStage} ${oneModel.run.failedWhy}`);
+  check('one outline call for the document', calls.outline_patch === 1);
+  check('its areas are its parts, in reading order', oneModel.clusters.slice(0, 3).map((c: any) => c.label).join(' | ') === 'Part 1 of Chapter 5.md | Part 2 of Chapter 5.md | Part 3 of Chapter 5.md', oneModel.clusters.map((c: any) => c.label).join(' | '));
+  check('no grouping call was spent on it', !calls.cluster_patch);
+  check('the outline is saved with the run', oneModel.outlines.length === 1 && oneModel.outlines[0].partIds.length === 3);
+  check('a part quoted from its heading is green', oneModel.concepts.some((c: any) => c.skeleton === 'PART' && c.status === 'VALIDATED'));
+  check('a main point with no quote is an orange guess', oneModel.concepts.some((c: any) => c.skeleton === 'MAIN' && c.status === 'PROPOSED'));
+  const src1 = oneModel.sources[0];
+  check('a failing section is halved and only the failing half is reported', (src1.unread ?? []).length === 1 && /first half/.test(src1.unread[0].locator), JSON.stringify(src1.unread));
+  check('the progress note names the hole', oneNotes.some((n) => /1 section not read/.test(n)), oneNotes.join(' / '));
+
   section(`${label}: after the build`);
   const after = await body(await filesRoute.POST(upload('late.md', '# Late\nA late file.'), params(id)));
   check('files cannot be added once the map is built', after.status === 409);
@@ -187,6 +258,7 @@ async function fullRun(label: string) {
   check('a decision on the finished map is saved', rejected.model.concepts.find((c: any) => c.id === target.id).status === 'REJECTED');
   const again = await body(await runIdRoute.GET(new Request('http://local'), params(id)));
   check('and is still there when the run is reopened', again.model.concepts.find((c: any) => c.id === target.id).status === 'REJECTED');
+
 
   const list = await body(await runRoute.GET());
   check('the run is listed', list.runs.some((r: any) => r.id === id && r.stage === 'READY'));

@@ -1,6 +1,6 @@
 import type { Blocked, CallMeta, Concept, Excerpt, Kind, LogEntry, Model, Question, Relationship, Statement } from './types';
 import { conceptDefaults, newId, noBlocks } from './types';
-import type { ExtractPatch, ProposePatch, ProposePatchRT } from './schema';
+import type { ExtractPatch, ExtractPatchPL, ProposePatch, ProposePatchRT } from './schema';
 import { capProposals, clearRejection, findDuplicate, isRejected, norm, saidThisTurn, wouldCreateCycle } from './guards';
 import { place, pointsOf, type PlaceKind, type Point } from './place';
 import { layoutLeftToRight, type NodeSize } from './layout';
@@ -64,11 +64,13 @@ export type WrittenEvidence = {
   chunkId: string;
   sourceId: string;
   locator: string;
+  /** Reading order of the section, so the story can replay a document as written. */
+  ord?: number;
 };
 
 export function applyExtract(
   model: Model,
-  patch: ExtractPatch,
+  patch: ExtractPatch | ExtractPatchPL,
   statementText: string,
   /**
    * Preload passes this. The only difference it makes is which array the
@@ -89,6 +91,7 @@ export function applyExtract(
         quote: statementText,
         locator: written.locator,
         turn,
+        ...(written.ord !== undefined ? { ord: written.ord } : {}),
       }
     : { id: newId('st'), text: statementText, at, turn };
 
@@ -98,7 +101,7 @@ export function applyExtract(
 
   const tempMap: Record<string, string> = {};
   const created: string[] = [];
-  const createdFrom = new Map<string, ExtractPatch['concepts'][number]>();
+  const createdFrom = new Map<string, (ExtractPatch | ExtractPatchPL)['concepts'][number]>();
 
   for (const pc of patch.concepts) {
     if (!pc.label.trim()) continue;

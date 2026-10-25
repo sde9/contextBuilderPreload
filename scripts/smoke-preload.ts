@@ -28,6 +28,8 @@ import { applyClusters, assignTiers, clusterEdges, conceptsAtLevel, coverage, cr
 import { chunkText, chooseStrategy, guessRole, PAGE_BREAK } from '../lib/chunk';
 import { docxXmlToText, dropRunningLines, looksLikeHeading, looksLikeRtf, pdfItemsToText, rtfToText } from '../lib/parse';
 import { emptyModel, newId, type Model, type Source } from '../lib/types';
+import { activeOutline, applyOutline, findQuote, liveId, normForQuote, sectionIdsFor, structureFromOutline } from '../lib/outline';
+import { halves } from '../lib/pipeline';
 import type { ExtractPatch, MergePatch, ClusterPatch } from '../lib/schema';
 
 let pass = 0;
@@ -655,6 +657,125 @@ const lateFee = visibleConcepts(spoken.model).find((c) => c.label === 'Late fee'
 check('a spoken concept cites its statement', lateFee.evidence.length === 1 && spoken.model.statements.some((s) => s.id === lateFee.evidence[0]));
 
 // ==========================================================================
+
+section('the skeleton: one outline per document, checked against the text');
+
+const chapter = [
+  '# Chapter 5 Discussion',
+  '',
+  'Read across the four questions, the findings suggest one main point about the TOE framework.',
+  '',
+  '## 5.1 Benefit and ease',
+  '',
+  'Perceived strategic benefit matters more than ease of use. Ease acts as a threshold where the owner has little time.',
+  '',
+  '## 5.2 Policy',
+  '',
+  'The owner’s judgement and personal checking take the place of policy.',
+  '',
+  '## 5.5 The TOE Framework in Owner-Managed Providers',
+  '',
+  'In owner-managed micro-providers the TOE contexts act through the owner’s knowledge and confidence, which work as a filter on all three.',
+].join(nl);
+const chSource: Source = {
+  id: 'src_ch5',
+  name: 'chapter 5.docx',
+  mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  bytes: chapter.length,
+  hash: 'h_ch5',
+  addedAt: new Date().toISOString(),
+  role: 'REFERENCE',
+  parse: 'OK',
+  parseNote: '',
+  chunkCount: 0,
+  conceptCount: 0,
+};
+const chChunks = chunkText(chSource.id, chapter, { name: chSource.name, role: 'REFERENCE' });
+chSource.chunkCount = chChunks.length;
+const shortIds = sectionIdsFor(chChunks);
+check('sections get short ids s1, s2, ...', [...shortIds.keys()].join(',') === chChunks.map((_, i) => `s${i + 1}`).join(','));
+check('quotes match across curly quotes, dashes and spacing', normForQuote('The owner\'s   judgement — and checking') === normForQuote('The owner’s judgement - and checking'));
+check('a quote is found in its section', findQuote(chChunks, 'the owner\'s judgement and personal checking take the place of policy.')?.locator === '§ 5.2 Policy');
+check('a short quote counts only as an exact heading', findQuote(chChunks, 'Policy') === null && findQuote(chChunks, '5.2 Policy')?.locator === '§ 5.2 Policy');
+
+const chBase: Model = { ...emptyModel('run_ch5'), title: 'понять поток мыслей', sources: [chSource], chunks: chChunks };
+const outlined = applyOutline(
+  chBase,
+  {
+    main: {
+      label: 'Owner as the filter',
+      note: 'The TOE contexts act through the owner.',
+      kind: 'CLAIM',
+      quote: 'the TOE contexts act through the owner’s knowledge and confidence, which work as a filter on all three',
+    },
+    parts: [
+      { tempId: 'p1', label: 'Benefit and ease', note: 'Partly supported: ease is a threshold.', kind: 'CLAIM', quote: '', sectionIds: ['s2'], pattern: 'ARGUMENT' },
+      { tempId: 'p2', label: 'Policy', note: 'Partly supported.', kind: 'CLAIM', quote: 'The owner\'s judgement and personal checking take the place of policy.', sectionIds: ['s3'], pattern: 'ARGUMENT' },
+      { tempId: 'p3', label: 'Owners read conditions differently', note: 'An invented quote.', kind: 'CLAIM', quote: 'Owners always read every condition the same way.', sectionIds: ['s4', 's99'], pattern: 'ARGUMENT' },
+      { tempId: 'p4', label: 'policy', note: 'A duplicate.', kind: 'ENTITY', quote: '', sectionIds: [], pattern: 'LIST' },
+    ],
+    links: [
+      { from: 'p1', to: 'main', type: 'SUPPORTS', label: 'points to', quote: '' },
+      { from: 'p2', to: 'main', type: 'SUPPORTS', label: 'points to', quote: 'The owner’s judgement and personal checking take the place of policy.' },
+      { from: 'p9', to: 'main', type: 'LEADS_TO', label: 'nothing', quote: '' },
+    ],
+  },
+  chChunks,
+  chSource
+);
+const om = outlined.model;
+const omMain = om.concepts.find((c) => c.skeleton === 'MAIN')!;
+const omParts = om.concepts.filter((c) => c.skeleton === 'PART').sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+check('the main point with a real quote is green and cites the sentence itself', omMain.status === 'VALIDATED' && om.excerpts.some((e) => omMain.evidence.includes(e.id) && e.quote.startsWith('the TOE contexts') && e.locator.includes('5.5')));
+check('parts keep reading order and drop a duplicate label', omParts.map((c) => c.label).join(' | ') === 'Benefit and ease | Policy | Owners read conditions differently' && outlined.blocked.duplicates === 1);
+check('a part named after its heading is green with no quote', omParts[0].status === 'VALIDATED' && om.excerpts.find((e) => e.id === omParts[0].evidence[0])?.quote === '5.1 Benefit and ease');
+check('a part whose quote is not in the text is an orange guess', omParts[2].status === 'PROPOSED' && omParts[2].origin === 'INFERRED' && omParts[2].evidence.length === 0);
+check('an unknown section id is counted, not used', outlined.blocked.invented >= 1);
+check('every section belongs to a part', chChunks.every((c) => Boolean(outlined.outline.sections[c.id])));
+check('the first section, claimed by nobody, joins the first part', outlined.outline.sections[chChunks[0].id] === omParts[0].id);
+const omLinks = om.relationships.filter((r) => r.type);
+check('a link with a found quote is green, one without is orange, an unknown end is dropped', omLinks.length === 2 && omLinks.some((r) => r.from === omParts[1].id && r.status === 'VALIDATED' && r.type === 'SUPPORTS') && omLinks.some((r) => r.from === omParts[0].id && r.status === 'PROPOSED'));
+check('the outline is recorded on the model', om.outlines?.length === 1 && om.outlines[0].mainId === omMain.id && om.outlines[0].partIds.length === 3);
+
+// Sections are then read with the skeleton as context. A detail in 5.2 and a
+// detail in 5.5 land in their parts, and one restates the main point.
+let omRead = om;
+omRead = applyExtract(omRead, {
+  concepts: [{ tempId: 'n1', label: 'Personal checking', note: '', matchesExistingId: '', kind: 'RULE', belongsTo: '' }],
+  relationships: [{ from: 'n1', to: omParts[1].id, label: 'stands in for' }],
+}, chChunks[2].text, { chunkId: chChunks[2].id, sourceId: chSource.id, locator: chChunks[2].locator, ord: chChunks[2].ordinal }).model;
+omRead = applyExtract(omRead, {
+  concepts: [
+    { tempId: 'n1', label: 'Owner as the filter', note: '', matchesExistingId: omMain.id, kind: 'CLAIM', belongsTo: '' },
+    { tempId: 'n2', label: 'Owner confidence', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' },
+  ],
+  relationships: [{ from: 'n2', to: 'n1', label: 'filters' }],
+}, chChunks[3].text, { chunkId: chChunks[3].id, sourceId: chSource.id, locator: chChunks[3].locator, ord: chChunks[3].ordinal }).model;
+check('a section restating the main point matches it instead of making a second box', omRead.concepts.filter((c) => c.label === 'Owner as the filter').length === 1);
+check('excerpts carry reading order', omRead.excerpts.filter((e) => e.ord !== undefined).length === omRead.excerpts.length);
+
+const readSrc = { ...chSource, conceptCount: 7 };
+const structured1 = structureFromOutline({ ...omRead, sources: [readSrc] }, activeOutline({ ...omRead, sources: [readSrc] })!);
+const sm = structured1.model;
+const areaLabels = sm.clusters.map((c) => c.label);
+check('one area per part, in reading order', areaLabels.slice(0, 3).join(' | ') === 'Benefit and ease | Policy | Owners read conditions differently', areaLabels.join(' | '));
+const checkingC = sm.concepts.find((c) => c.label === 'Personal checking')!;
+check('a detail sits in the area of the part it was read in', sm.clusters.find((cl) => cl.id === checkingC.clusterId)?.label === 'Policy');
+const confC = sm.concepts.find((c) => c.label === 'Owner confidence')!;
+check('a detail from 5.5 sits with the part that covers 5.5', sm.clusters.find((cl) => cl.id === confC.clusterId)?.label === 'Owners read conditions differently');
+check('the main point is in no area, and is main tier', sm.concepts.find((c) => c.id === omMain.id)!.clusterId === '' && sm.concepts.find((c) => c.id === omMain.id)!.tier === 2);
+check('parts are main tier and keep their order', sm.concepts.filter((c) => c.skeleton === 'PART').every((c) => c.tier === 2 && typeof c.order === 'number'));
+check('activeOutline needs exactly one document', activeOutline({ ...sm, sources: [readSrc, { ...readSrc, id: 'src_other' }] }) === null);
+
+// A merge that absorbs a part keeps the part in the skeleton.
+const absorbed = { ...sm, concepts: sm.concepts.map((c) => (c.id === omParts[1].id ? { ...c, absorbedInto: checkingC.id } : c)) };
+check('a part absorbed by a merge is followed to its survivor', liveId(absorbed, omParts[1].id) === checkingC.id);
+
+const halved = halves('One. Two.' + nl + nl + 'x'.repeat(300) + nl + nl + 'y'.repeat(300));
+check('a failed section is halved at a paragraph break', halved !== null && halved[0].startsWith('One.') && halved[1].startsWith('y') && !halved[0].includes('y'));
+check('a short failed section is not halved', halves('Too short to split.') === null);
+const oneParagraph = halves('First sentence here. '.repeat(40));
+check('one long paragraph is halved at a sentence end', oneParagraph !== null && oneParagraph[0].endsWith('.') && oneParagraph[1].startsWith('First'));
 
 console.log(`\n${pass} passed, ${fail} failed.\n`);
 if (fail > 0) process.exit(1);

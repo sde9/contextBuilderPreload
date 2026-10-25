@@ -38,6 +38,15 @@ export default function SourceRail() {
                 <span className="src-name">{source.name}</span>
                 <span className="src-role">{ROLE_LABEL[source.role]}</span>
                 <span className="src-count">{source.parse === 'OK' ? row.concepts : '—'}</span>
+                {(source.unread ?? []).length > 0 && (
+                  <span
+                    className="src-warn"
+                    title={(source.unread ?? []).map((u) => `${u.locator}: ${u.why}`).join('\n')}
+                  >
+                    {(source.unread ?? []).length} {(source.unread ?? []).length === 1 ? 'section' : 'sections'} not read:{' '}
+                    {(source.unread ?? []).map((u) => u.locator).join('; ')}
+                  </span>
+                )}
               </button>
             </li>
           );

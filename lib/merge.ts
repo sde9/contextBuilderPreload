@@ -101,8 +101,13 @@ function mergeInto(
   keep.note = keep.note || gone.note;
   for (const e of gone.evidence) if (!keep.evidence.includes(e)) keep.evidence.push(e);
   if (!keep.mergedFrom.includes(absorbedId)) keep.mergedFrom.push(absorbedId);
-  // A merged node is at least as central as either half.
+  // A merged node is at least as central as either half, and a skeleton
+  // node keeps its place in the outline whichever id survives.
   if (gone.tier === 2) keep.tier = 2;
+  if (gone.skeleton && !keep.skeleton) {
+    keep.skeleton = gone.skeleton;
+    keep.order = gone.order;
+  }
 
   gone.absorbedInto = keepId;
 
@@ -221,6 +226,7 @@ export function combineSourceModels(models: Model[], sources: Source[]): { model
     excerpts: ordered.flatMap((m) => m.excerpts),
     clusters: [],
     run: null,
+    outlines: ordered.flatMap((m) => m.outlines ?? []),
   };
 
   // Exact matches, strongest source first so the survivor is the formal one.
@@ -279,10 +285,14 @@ export function shortlistPairs(model: Model, limit = 240): Pair[] {
 
   const add = (a: Concept, b: Concept, why: Pair['why'], score: number) => {
     if (a.id === b.id) return;
-    // Nothing to reconcile inside one document: stage 1 already deduped it.
-    const sa = bySource.get(a.id) ?? '';
-    const sb = bySource.get(b.id) ?? '';
-    if (sa && sa === sb) return;
+    // Inside one document only the exact-label guard ran at stage 1, and each
+    // section was read on its own, so "Confidence" and "Owner's confidence"
+    // can both survive it. Pairs from the same document are shortlisted too.
+    // Two parts of the same skeleton are different by design.
+    if (a.skeleton === 'PART' && b.skeleton === 'PART') {
+      const sa = bySource.get(a.id) ?? '';
+      if (sa && sa === (bySource.get(b.id) ?? '')) return;
+    }
     const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
     const existing = pairs.get(key);
     if (existing && existing.score >= score) return;

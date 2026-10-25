@@ -24,6 +24,7 @@ const KIND_TAG: Record<Kind, string> = {
   RULE: 'rule',
   QUESTION: 'question',
   PROBLEM: 'problem',
+  CLAIM: 'claim',
 };
 
 /*

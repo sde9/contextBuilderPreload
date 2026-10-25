@@ -28,6 +28,7 @@ const SECTOR: Record<Kind, number> = {
   RULE: -Math.PI * 0.52,
   QUESTION: Math.PI * 0.85,
   PROBLEM: -Math.PI * 0.85,
+  CLAIM: Math.PI * 0.3,
 };
 
 export type Point = { x: number; y: number };

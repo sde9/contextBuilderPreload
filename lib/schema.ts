@@ -344,3 +344,160 @@ export const CLUSTER_JSON_SCHEMA = {
     },
   },
 } as const;
+
+// ---------------------------------------------------------------- Preload
+
+/*
+ * Preload variants. The live mode keeps the shared schemas exactly as they
+ * are; a document gets one more kind and a call of its own.
+ */
+
+/** CLAIM is for documents: a statement the text asserts, tests or concludes. */
+const KIND_PL = [...KIND, 'CLAIM'] as const;
+
+export const ExtractPatchPL = ExtractPatch.extend({
+  concepts: z.array(
+    z.object({
+      tempId: z.string(),
+      label: z.string(),
+      note: z.string(),
+      matchesExistingId: z.string(),
+      kind: z.enum(KIND_PL),
+      belongsTo: z.string(),
+    })
+  ),
+});
+
+export type ExtractPatchPL = z.infer<typeof ExtractPatchPL>;
+
+export const EXTRACT_PL_JSON_SCHEMA = {
+  ...EXTRACT_JSON_SCHEMA,
+  properties: {
+    ...EXTRACT_JSON_SCHEMA.properties,
+    concepts: {
+      ...EXTRACT_JSON_SCHEMA.properties.concepts,
+      items: {
+        ...EXTRACT_JSON_SCHEMA.properties.concepts.items,
+        properties: {
+          ...EXTRACT_JSON_SCHEMA.properties.concepts.items.properties,
+          kind: { type: 'string', enum: [...KIND_PL] },
+        },
+      },
+    },
+  },
+} as const;
+
+/*
+ * OutlinePatch. One call per document, before its sections are read.
+ *
+ * It returns the skeleton a reader needs first: the main point, the parts in
+ * reading order, and how the parts connect. Every item carries a quote. The
+ * server checks each quote against the document, character for character
+ * after whitespace, and anything it cannot find is drawn orange as the AI's
+ * reading rather than green as something written (R2).
+ */
+
+const PATTERNS = ['SEQUENCE', 'ARGUMENT', 'STRUCTURE', 'LIST'] as const;
+const LINK_TYPES = ['LEADS_TO', 'DEPENDS_ON', 'SUPPORTS', 'CONTRADICTS', 'REFINES'] as const;
+
+export const OutlinePatch = z.object({
+  main: z.object({
+    label: z.string(),
+    note: z.string(),
+    kind: z.enum(KIND_PL),
+    quote: z.string(),
+  }),
+  parts: z.array(
+    z.object({
+      tempId: z.string(),
+      label: z.string(),
+      note: z.string(),
+      kind: z.enum(KIND_PL),
+      quote: z.string(),
+      sectionIds: z.array(z.string()),
+      pattern: z.enum(PATTERNS),
+    })
+  ),
+  links: z.array(
+    z.object({
+      from: z.string(),
+      to: z.string(),
+      type: z.enum(LINK_TYPES),
+      label: z.string(),
+      quote: z.string(),
+    })
+  ),
+});
+
+export type OutlinePatch = z.infer<typeof OutlinePatch>;
+
+const QUOTE_DESCRIPTION =
+  'One sentence copied from the document character for character that states this, or a heading copied exactly. Empty string if no sentence states it.';
+
+export const OUTLINE_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['main', 'parts', 'links'],
+  properties: {
+    main: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['label', 'note', 'kind', 'quote'],
+      properties: {
+        label: { type: 'string', description: 'The main point or subject in 2-8 words, in the document\'s own vocabulary.' },
+        note: { type: 'string', description: 'One sentence a newcomer could repeat.' },
+        kind: { type: 'string', enum: [...KIND_PL] },
+        quote: { type: 'string', description: QUOTE_DESCRIPTION },
+      },
+    },
+    parts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['tempId', 'label', 'note', 'kind', 'quote', 'sectionIds', 'pattern'],
+        properties: {
+          tempId: { type: 'string', description: 'Local handle, "p1", "p2", in reading order.' },
+          label: { type: 'string', description: 'Short name, 1-6 words, from the document\'s headings or words.' },
+          note: {
+            type: 'string',
+            description: 'One sentence on what this part says. For a claim that is tested, start with its verdict.',
+          },
+          kind: { type: 'string', enum: [...KIND_PL] },
+          quote: { type: 'string', description: QUOTE_DESCRIPTION },
+          sectionIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Ids from the SECTIONS list that this part covers, in order. Every section belongs to one part.',
+          },
+          pattern: {
+            type: 'string',
+            enum: [...PATTERNS],
+            description:
+              'How the inside of this part is organised. SEQUENCE = steps or events in order. ARGUMENT = claims, evidence, verdicts. STRUCTURE = components, roles, rules. LIST = items of the same kind.',
+          },
+        },
+      },
+    },
+    links: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['from', 'to', 'type', 'label', 'quote'],
+        properties: {
+          from: { type: 'string', description: 'A part tempId, or "main".' },
+          to: { type: 'string', description: 'A part tempId, or "main". Different from "from".' },
+          type: {
+            type: 'string',
+            enum: [...LINK_TYPES],
+            description:
+              'LEADS_TO = produces, causes or comes before. DEPENDS_ON = needs. SUPPORTS = gives evidence for. CONTRADICTS = is in tension with. REFINES = narrows, qualifies or gives an example of.',
+          },
+          label: { type: 'string', description: 'Short verb phrase in the document\'s words, e.g. "acts through".' },
+          quote: { type: 'string', description: QUOTE_DESCRIPTION },
+        },
+      },
+    },
+  },
+} as const;

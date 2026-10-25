@@ -29,9 +29,13 @@ export type Kind =
   | 'STEP' // one step in a sequence
   | 'RULE' // a constraint, policy or condition
   | 'QUESTION' // an open question: "Who are the clients?"
-  | 'PROBLEM'; // a pain point: "Dresses are expensive to rent"
+  | 'PROBLEM' // a pain point: "Dresses are expensive to rent"
+  // Preload only. A statement a document asserts, tests or concludes:
+  // "Benefit matters more than ease of use". Live sessions never produce it,
+  // because the shared extract schema does not offer it.
+  | 'CLAIM';
 
-export const KINDS: Kind[] = ['ENTITY', 'ATTRIBUTE', 'ACTOR', 'STEP', 'RULE', 'QUESTION', 'PROBLEM'];
+export const KINDS: Kind[] = ['ENTITY', 'ATTRIBUTE', 'ACTOR', 'STEP', 'RULE', 'QUESTION', 'PROBLEM', 'CLAIM'];
 
 /** Pre-Kind saves carried viewHint. Tolerant mapping so old .context.json files still load. */
 const LEGACY_KIND_MAP: Record<string, Kind> = {
@@ -93,6 +97,14 @@ export type Concept = {
   absorbedInto: string;
   /** R8. Present only on a CONTESTED node. */
   contest: Contest | null;
+
+  /**
+   * Preload. Set on the concepts the outline call made: the document's main
+   * point, and its parts in reading order. Absent everywhere else.
+   */
+  skeleton?: 'MAIN' | 'PART';
+  /** Reading order of a part, 0-based. */
+  order?: number;
 };
 
 /** One side of a disagreement between documents. */
@@ -113,11 +125,21 @@ export type Contest = {
   resolved: 'NONE' | 'KEPT_FIRST' | 'KEPT_SECOND' | 'SPLIT';
 };
 
+/**
+ * Preload. What kind of connection a link is, so the canvas can draw it and
+ * the story can order it. The label stays free text; the type is the class.
+ */
+export type LinkType = 'LEADS_TO' | 'DEPENDS_ON' | 'SUPPORTS' | 'CONTRADICTS' | 'REFINES';
+
+export const LINK_TYPES: LinkType[] = ['LEADS_TO', 'DEPENDS_ON', 'SUPPORTS', 'CONTRADICTS', 'REFINES'];
+
 export type Relationship = {
   id: string;
   from: string;
   to: string;
   label: string;
+  /** Preload outline links only. Absent on links read from a section or said aloud. */
+  type?: LinkType;
   origin: Origin;
   status: Status;
   turn: number;
@@ -145,6 +167,10 @@ export type Question = {
    * also retires questions to DONE. Only a dismissed question is a closed topic.
    */
   dismissedAt: string;
+  /** Preload. Set when the user kept it in the list of questions to ask. */
+  savedAt?: string;
+  /** Preload. The concept the question is about, "" or absent when none. */
+  anchorId?: string;
 };
 
 /**
@@ -192,7 +218,19 @@ export function addBlocks(a: Blocked, b: Blocked): Blocked {
 export type LogEntry = {
   turn: number;
   at: string;
-  kind: 'extract' | 'propose' | 'confirm' | 'reject' | 'merge' | 'split' | 'cluster' | 'resolve' | 'edit' | 'goal';
+  kind:
+    | 'extract'
+    | 'propose'
+    | 'confirm'
+    | 'reject'
+    | 'merge'
+    | 'split'
+    | 'cluster'
+    | 'resolve'
+    | 'edit'
+    | 'goal'
+    | 'outline'
+    | 'question';
   payload: unknown;
   /** Guard activity, so prompt failures are measurable rather than invisible. */
   blocked?: Blocked;
@@ -251,6 +289,11 @@ export type Source = {
   chunkCount: number;
   /** Filled in after stage 1. */
   conceptCount: number;
+  /**
+   * R11. Sections that could not be read even after being split in two and
+   * tried again. Shown on the rail, so a map with a hole says where it is.
+   */
+  unread?: { locator: string; why: string }[];
 };
 
 export type Chunk = {
@@ -271,6 +314,8 @@ export type Excerpt = {
   quote: string;
   locator: string;
   turn: number;
+  /** Reading order of the section within its document (the chunk ordinal). */
+  ord?: number;
 };
 
 /**
@@ -283,6 +328,22 @@ export type Cluster = {
   memberIds: string[];
   origin: 'INFERRED' | 'USER';
   confirmed: boolean;
+};
+
+/** How the inside of a part is organised. Decides its order in the story. */
+export type PartPattern = 'SEQUENCE' | 'ARGUMENT' | 'STRUCTURE' | 'LIST';
+
+/**
+ * Preload. One document's skeleton: its main point, its parts in reading
+ * order, and which sections each part covers.
+ */
+export type Outline = {
+  sourceId: string;
+  mainId: string;
+  partIds: string[];
+  patterns: Record<string, PartPattern>;
+  /** chunk id -> part concept id. */
+  sections: Record<string, string>;
 };
 
 export type RunStage =
@@ -342,6 +403,8 @@ export type Model = {
   excerpts: Excerpt[];
   clusters: Cluster[];
   run: Run | null;
+  /** One per document that got a skeleton. Absent in older runs. */
+  outlines?: Outline[];
 };
 
 export function emptyModel(sessionId: string): Model {
@@ -405,6 +468,7 @@ export function normaliseModel(raw: Partial<Model> & { sessionId?: string }): Mo
     clusters: raw.clusters ?? [],
     run: raw.run ?? null,
     log: raw.log ?? [],
+    outlines: raw.outlines ?? [],
   };
 }
 

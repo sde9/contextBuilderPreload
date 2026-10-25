@@ -53,7 +53,7 @@ export default function RunProgress() {
                 s.parse !== 'OK'
                   ? s.parseNote
                   : s.conceptCount > 0
-                    ? `${s.conceptCount} concepts`
+                    ? `${s.conceptCount} concepts${(s.unread ?? []).length ? `, ${(s.unread ?? []).length} not read` : ''}`
                     : s.conceptCount < 0
                       ? 'nothing found'
                       : isCurrent

@@ -39,6 +39,7 @@ export const KIND_DEFAULT_SIZE: Record<Kind, NodeSize> = {
   RULE: { width: 200, height: 84 },
   QUESTION: { width: 260, height: 110 },
   PROBLEM: { width: 260, height: 110 },
+  CLAIM: { width: 240, height: 88 },
 };
 
 /*

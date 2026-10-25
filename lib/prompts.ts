@@ -6,7 +6,7 @@
  * back to the wording that produced it.
  */
 
-export const PROMPT_VERSION = 'p4-2026-10-21';
+export const PROMPT_VERSION = 'p5-2026-10-25';
 
 const KIND_VOCAB = `
 KIND. Seven values, and they classify the ROLE a thing plays in the
@@ -396,6 +396,11 @@ export function clusterUser(payload: {
 /**
  * Stage 1 framing. EXTRACT_SYSTEM itself is untouched, per the standard: what
  * changes for a document is the user message, never the system prompt.
+ *
+ * When the document has a skeleton, each section is read knowing it: the
+ * main point and the parts are listed as concepts already recorded, so a
+ * section that talks about one of them says so through matchesExistingId
+ * instead of creating a second box, and its links can reach across sections.
  */
 export function extractDocumentUser(input: {
   sourceName: string;
@@ -403,6 +408,8 @@ export function extractDocumentUser(input: {
   locator: string;
   text: string;
   concepts: { id: string; label: string; note: string; status: string }[];
+  /** The part of the skeleton this section belongs to, when there is one. */
+  part?: { id: string; label: string } | null;
 }): string {
   const list = input.concepts.length
     ? input.concepts.map((c) => `  ${c.id}  ${c.label}${c.note ? ` (${c.note})` : ''}`).join('\n')
@@ -413,11 +420,92 @@ export function extractDocumentUser(input: {
     list,
     ``,
     `THIS IS AN EXTRACT FROM A ${input.role} DOCUMENT: ${input.sourceName} (${input.locator})`,
+    input.part ? `It belongs to the part "${input.part.label}" (${input.part.id}).` : '',
     `Treat it exactly as you would treat something a person said out loud.`,
     `Record what it states. Record nothing it merely implies.`,
+    ``,
+    DOCUMENT_KIND_NOTE,
+    input.part
+      ? `When the extract itself connects what it says to "${input.part.label}" or to another concept above, record that relationship with its id. Do not invent a link the text does not make.`
+      : '',
     ``,
     `"""`,
     input.text,
     `"""`,
-  ].join('\n');
+  ]
+    .filter((line, i, all) => line !== '' || all[i - 1] !== '')
+    .join('\n');
+}
+
+/** Documents argue as well as describe. One extra kind, offered in the user message only. */
+const DOCUMENT_KIND_NOTE = `
+ONE MORE KIND FOR DOCUMENTS: CLAIM. A statement the document asserts, tests or
+concludes, labelled as a short statement: "Benefit matters more than ease of
+use", "Confidence acts as a filter". When the document gives a verdict on it
+(supported, partly supported, not supported, rejected), start the note with
+that verdict. Use CLAIM for what the document argues; keep ENTITY for things.
+`.trim();
+
+export const OUTLINE_SYSTEM = `
+You read one whole document and return its skeleton: what a person needs to
+see first to understand how the document is built and where it is going.
+
+MAIN. The one thing the document is about, or the one point it reaches. A
+report, thesis or proposal usually reaches a point: give it as a CLAIM. A
+specification, manual or price list is usually about something: give that
+thing with the kind that fits it.
+
+PARTS. The document's parts in the order it presents them. Use its own
+headings when it has them; a part may cover several sections, and every
+section belongs to exactly one part. Three to nine parts for a long document,
+fewer for a short one. A label is 1-6 words in the document's vocabulary. The
+note is one sentence on what the part says, not what it is about: "Owners'
+confidence decides how they read each condition", not "Discussion of
+confidence". When a part tests a claim, start the note with the verdict.
+
+LINKS. How the parts connect to each other and to MAIN, as the document
+connects them, through what it says or through its order. Up to twelve.
+Prefer the links a reader most needs to follow the line of thought.
+
+QUOTES. Every item has a quote: one sentence copied from the document
+character for character that states it, or a heading copied exactly. If no
+sentence states it, the quote is an empty string. A quote that cannot be found
+in the document is thrown away and the item is shown as your reading, not as
+something the document says. Never shorten, tidy or paraphrase a quote.
+
+Record what the document says. Do not judge it, improve it, or add parts it
+does not have.
+`.trim();
+
+/**
+ * The whole document when it fits, otherwise each section's opening, so even
+ * a long report gets one look at its shape before any section is read alone.
+ */
+export function outlineUser(input: {
+  sourceName: string;
+  role: string;
+  title: string;
+  sections: { id: string; locator: string; text: string }[];
+  budget?: number;
+}): string {
+  const budget = input.budget ?? 60000;
+  const total = input.sections.reduce((n, s) => n + s.text.length, 0);
+  const per = total <= budget ? Infinity : Math.max(300, Math.floor(budget / Math.max(1, input.sections.length)));
+  const body = input.sections
+    .map((s) => {
+      const text = s.text.length > per ? `${s.text.slice(0, per)} [...]` : s.text;
+      return `[${s.id}] ${s.locator}\n${text}`;
+    })
+    .join('\n\n');
+
+  return [
+    `DOCUMENT: ${input.sourceName} (${input.role})`,
+    input.title && !/^untitled/i.test(input.title) ? `THE PERSON CALLED THIS PROJECT: ${input.title}` : '',
+    total > budget ? `Long document: each section below is cut to its opening.` : '',
+    ``,
+    `SECTIONS`,
+    body,
+  ]
+    .filter((line, i, all) => line !== '' || all[i - 1] !== '')
+    .join('\n');
 }

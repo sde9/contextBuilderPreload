@@ -47,7 +47,7 @@ export function assignTiers(model: Model): Model {
 
   const tierOf = new Map<string, 2 | 3>();
   for (const c of live) {
-    const detail = c.kind === 'ATTRIBUTE' || Boolean(c.belongsTo);
+    const detail = !c.skeleton && (c.kind === 'ATTRIBUTE' || Boolean(c.belongsTo));
     tierOf.set(c.id, detail ? 3 : 2);
   }
 
@@ -60,7 +60,9 @@ export function assignTiers(model: Model): Model {
   }
   for (const [, members] of byCluster) {
     if (members.length <= MAX_MAIN_PER_CLUSTER) continue;
-    const ranked = [...members].sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0));
+    const ranked = [...members]
+      .filter((c) => !c.skeleton)
+      .sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0));
     for (const c of ranked.slice(MAX_MAIN_PER_CLUSTER)) tierOf.set(c.id, 3);
   }
 
