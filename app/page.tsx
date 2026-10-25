@@ -11,6 +11,7 @@ import RestoreBar from '@/components/RestoreBar';
 import { useSession } from '@/lib/store';
 import { visibleConcepts } from '@/lib/reducer';
 import { saveSession } from '@/lib/persist';
+import ShapeLegend, { LIVE_SHAPES } from '@/components/ShapeLegend';
 
 /** How long the model must sit still before it is written to the browser. */
 const AUTOSAVE_MS = 800;
@@ -175,15 +176,7 @@ export default function Page() {
           <span className="k-green">■</span> said &nbsp;
           <span className="k-orange">■</span> guessed, needs a yes or no
         </div>
-        <div className="kind-legend">
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-entity" /> Entity</span>
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-attribute" /> Attribute</span>
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-actor" /> Actor</span>
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-step" /> Step</span>
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-rule" /> Rule</span>
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-question" /> Question</span>
-          <span className="kind-legend-item"><span className="kind-swatch kind-swatch-problem" /> Problem</span>
-        </div>
+        <ShapeLegend kinds={LIVE_SHAPES} sizeNote={false} />
         <Composer />
       </footer>
     </main>

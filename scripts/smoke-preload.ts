@@ -12,7 +12,17 @@
  * prompt.
  */
 
-import { applyExtract, visibleConcepts, visibleRelationships } from '../lib/reducer';
+import {
+  addQuestion,
+  applyExtract,
+  applyPropose,
+  dismissQuestion,
+  questionFromConcept,
+  saveQuestion,
+  unsaveQuestion,
+  visibleConcepts,
+  visibleRelationships,
+} from '../lib/reducer';
 import {
   applyMerge,
   combineSourceModels,
@@ -29,7 +39,11 @@ import { chunkText, chooseStrategy, guessRole, PAGE_BREAK } from '../lib/chunk';
 import { docxXmlToText, dropRunningLines, looksLikeHeading, looksLikeRtf, pdfItemsToText, rtfToText } from '../lib/parse';
 import { emptyModel, newId, type Model, type Source } from '../lib/types';
 import { activeOutline, applyOutline, findQuote, liveId, normForQuote, sectionIdsFor, structureFromOutline } from '../lib/outline';
-import { halves } from '../lib/pipeline';
+import { halves, joinAreas } from '../lib/pipeline';
+import { questionsMarkdown } from '../lib/preloadStore';
+import { buildStory, revealOf, revealOfEdge, stepIndex } from '../lib/story';
+import { LABEL_BELOW, layoutByParts, roundedPath, routeOutlineLink, type Route } from '../lib/layout';
+import type { Concept } from '../lib/types';
 import type { ExtractPatch, MergePatch, ClusterPatch } from '../lib/schema';
 
 let pass = 0;
@@ -776,6 +790,159 @@ check('a failed section is halved at a paragraph break', halved !== null && halv
 check('a short failed section is not halved', halves('Too short to split.') === null);
 const oneParagraph = halves('First sentence here. '.repeat(40));
 check('one long paragraph is halved at a sentence end', oneParagraph !== null && oneParagraph[0].endsWith('.') && oneParagraph[1].startsWith('First'));
+
+section('the story behind the slider');
+
+const logic = buildStory(sm, 'LOGIC');
+const logicTitles = logic.steps.map((st) => st.title);
+check('logic starts with the main point', logic.steps[0].title === 'Main point' && logic.steps[0].conceptIds[0] === omMain.id, logicTitles.join(' | '));
+check('then each part in reading order', logicTitles.slice(1, 4).join(' | ') === '1. Benefit and ease | 2. Policy | 3. Owners read conditions differently', logicTitles.join(' | '));
+check('a part step brings its details with it', logic.steps[2].conceptIds.includes(checkingC.id));
+check('the main point step quotes its sentence', /act through the owner/i.test(logic.steps[0].quote));
+const placedOnce = logic.steps.flatMap((st) => st.conceptIds);
+check('every concept on the map is placed exactly once', new Set(placedOnce).size === placedOnce.length && sm.concepts.filter((c) => c.status !== 'REJECTED' && !c.absorbedInto).every((c) => placedOnce.includes(c.id)));
+const overviewOnly = sm.concepts.filter((c) => c.skeleton);
+check('at the overview level the story is the skeleton alone', buildStory(sm, 'LOGIC', overviewOnly).steps.every((st) => st.conceptIds.every((id) => overviewOnly.some((c) => c.id === id))));
+
+const written = buildStory(sm, 'WRITTEN');
+const wOrder = written.steps.map((st) => st.locator);
+check('as written follows the sections in order', wOrder.join(' | ') === [...wOrder].sort((a, b) => chChunks.findIndex((c) => c.locator === a) - chChunks.findIndex((c) => c.locator === b)).join(' | '), wOrder.join(' | '));
+check('as written puts the main point where its sentence is', written.steps.find((st) => st.conceptIds.includes(omMain.id))?.locator.includes('5.5') === true);
+
+const idx = stepIndex(logic);
+check('a concept is past, current or future against the step', revealOf(idx, omMain.id, 0) === 'current' && revealOf(idx, omMain.id, 2) === 'past' && revealOf(idx, checkingC.id, 0) === 'future');
+check('with no step the story is off', revealOf(idx, omMain.id, null) === null);
+check('an edge arrives with its later end', revealOfEdge(idx, { from: omMain.id, to: checkingC.id }, 1) === 'future' && revealOfEdge(idx, { from: omMain.id, to: checkingC.id }, 2) === 'current');
+
+const liveM = applyPropose(applyExtract(emptyModel('s_live'), {
+  concepts: [{ tempId: 'n1', label: 'Booking', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }],
+  relationships: [],
+}, 'People book online.').model, {
+  concepts: [{ tempId: 'q1', label: 'Who pays?', why: 'No payer yet.', attachTo: '', relationLabel: 'paid by', kind: 'QUESTION', isPropertyOfTarget: false }],
+  relationships: [],
+  questions: [],
+}, 5).model;
+const liveBooking = liveM.concepts.find((c) => c.label === 'Booking')!;
+const live2 = applyExtract(liveM, {
+  concepts: [{ tempId: 'n1', label: 'Deposit', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }],
+  relationships: [{ from: 'n1', to: liveBooking.id, label: 'secures' }],
+}, 'A deposit secures the booking.').model;
+const liveStory = buildStory(live2, 'WRITTEN');
+check('a live session replays turn by turn', liveStory.steps[0].title === 'Turn 1' && liveStory.steps[1].title === 'Turn 2' && liveStory.steps[1].quote === 'A deposit secures the booking.', liveStory.steps.map((st) => st.title).join(' | '));
+
+section('the outline layout keeps links off the boxes');
+
+const box = (id: string, kind: Concept['kind'] = 'ENTITY'): Concept => ({
+  id, label: id, note: '', origin: 'EXPLICIT', status: 'VALIDATED', kind, belongsTo: '', level: 0, evidence: [], turn: 0,
+  x: 0, y: 0, pinned: false, tier: 2, clusterId: '', mergedFrom: [], absorbedInto: '', contest: null,
+});
+const lay = ['main', 'pA', 'pB', 'a1', 'a2', 'a3', 'a4', 'b1', 'loose'].map((id) => box(id));
+const laySizes: Record<string, { width: number; height: number }> = {
+  main: { width: 320, height: 90 }, pA: { width: 260, height: 70 }, pB: { width: 260, height: 110 },
+  a1: { width: 220, height: 60 }, a2: { width: 170, height: 40 }, a3: { width: 240, height: 90 }, a4: { width: 220, height: 50 },
+  b1: { width: 220, height: 50 }, loose: { width: 220, height: 50 },
+};
+const outlineLay = layoutByParts(lay, [{ leadId: 'pA', memberIds: ['a1', 'a2', 'a3', 'a4'] }, { leadId: 'pB', memberIds: ['b1'] }], 'main', laySizes);
+const layBoxes = new Map(outlineLay.points.map((pt) => [pt.id, { x: pt.x, y: pt.y, ...laySizes[pt.id] }]));
+const bx = (id: string) => layBoxes.get(id)!;
+check('every concept gets a place, a stray one in a last row', outlineLay.points.length === lay.length && bx('loose').y > bx('b1').y);
+const overlap = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+const boxList = [...layBoxes.entries()];
+check('no two boxes overlap', boxList.every(([i, a]) => boxList.every(([j, b]) => i === j || !overlap(a, b))));
+check('details sit in slots that line up from row to row',
+  bx('a1').x + bx('a1').width / 2 === bx('b1').x + bx('b1').width / 2 && bx('a4').x === bx('a1').x, `${bx('a1').x} ${bx('b1').x} ${bx('a4').x}`);
+check('a fourth detail starts a second line, below the first line\'s rail',
+  bx('a4').y > outlineLay.places.get('a1')!.rail && outlineLay.places.get('a4')!.rail > outlineLay.places.get('a1')!.rail);
+check('the next part starts below the last rail', bx('pB').y > outlineLay.places.get('a4')!.rail);
+check('the first rail clears the part too', outlineLay.places.get('b1')!.rail > bx('pB').y + bx('pB').height);
+
+const own = routeOutlineLink('a3', 'pA', layBoxes, outlineLay, 'main')!;
+check('a detail reaches its part along the rail under its line',
+  own.points.length === 4 && own.points[1].y === outlineLay.places.get('a3')!.rail && own.points[2].y === own.points[1].y
+    && own.points[3].x === bx('pA').x + bx('pA').width / 2 && own.points[3].y === bx('pA').y + bx('pA').height);
+check('its label sits just under the detail', own.label.y === bx('a3').y + bx('a3').height + LABEL_BELOW && own.label.x === bx('a3').x + bx('a3').width / 2);
+const back = routeOutlineLink('pA', 'a3', layBoxes, outlineLay, 'main')!;
+check('a link from the part runs the same way, the other direction', back.points[0].x === own.points[3].x && back.points.at(-1)!.y === own.points[0].y);
+const up = routeOutlineLink('b1', 'main', layBoxes, outlineLay, 'main')!;
+check('a detail reaches the main point by its right side', up.points.at(-1)!.x === bx('main').x + bx('main').width && up.points.at(-1)!.y === bx('main').y + bx('main').height / 2);
+const across = routeOutlineLink('b1', 'pA', layBoxes, outlineLay, 'main')!;
+check('a detail reaches another part along the corridor', across.points.some((pt) => pt.x === outlineLay.corridorX) && across.points.at(-1)!.x === bx('pA').x + bx('pA').width);
+check('two details side by side are left to React Flow', routeOutlineLink('a1', 'a2', layBoxes, outlineLay, 'main') === null);
+const overTop = routeOutlineLink('a1', 'a3', layBoxes, outlineLay, 'main')!;
+check('two details further apart are joined over the top of the line', overTop.points[1].y < bx('a1').y && overTop.points[1].y === overTop.points[2].y);
+check('the spine is not routed here', routeOutlineLink('main', 'pB', layBoxes, outlineLay, 'main') === null);
+
+// The point of the routes: no line runs behind a box it does not belong to.
+const crosses = (r: Route, ends: string[]) => {
+  for (let i = 1; i < r.points.length; i++) {
+    const [p, q] = [r.points[i - 1], r.points[i]];
+    for (const [id, b] of layBoxes) {
+      if (ends.includes(id)) continue;
+      const inX = (x: number) => x > b.x && x < b.x + b.width;
+      const inY = (y: number) => y > b.y && y < b.y + b.height;
+      if (p.y === q.y && inY(p.y) && Math.max(p.x, q.x) > b.x && Math.min(p.x, q.x) < b.x + b.width) return id;
+      if (p.x === q.x && inX(p.x) && Math.max(p.y, q.y) > b.y && Math.min(p.y, q.y) < b.y + b.height) return id;
+    }
+  }
+  return '';
+};
+const routes: [string, string][] = [['a1', 'pA'], ['a2', 'pA'], ['a3', 'pA'], ['a4', 'pA'], ['b1', 'pB'], ['pA', 'a3'], ['b1', 'main'], ['a3', 'main'], ['a4', 'main'], ['b1', 'pA'], ['a4', 'pB'], ['a1', 'a3']];
+const hits = routes.map(([f, t]) => `${f}>${t}:${crosses(routeOutlineLink(f, t, layBoxes, outlineLay, 'main')!, [f, t])}`).filter((x) => !x.endsWith(':'));
+check('no route runs behind another box', hits.length === 0, hits.join(' '));
+
+const rp = roundedPath([{ x: 0, y: 0 }, { x: 0, y: 40 }, { x: 100, y: 40 }, { x: 100, y: 10 }]);
+check('a route is drawn with rounded corners and ends where it should', rp.startsWith('M 0,0') && (rp.match(/Q/g) ?? []).length === 2 && rp.endsWith('L 100,10'), rp);
+
+section('questions to ask');
+
+const qBase = applyExtract(emptyModel('s_q'), {
+  concepts: [{ tempId: 'n1', label: 'Refund', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }],
+  relationships: [],
+}, 'Refunds go back to the card.').model;
+const refund = qBase.concepts.find((c) => c.label === 'Refund')!;
+const qModel = applyPropose(qBase, {
+  concepts: [{ tempId: 'g1', label: 'Who approves a refund?', why: 'Nobody says who signs it off.', attachTo: refund.id, relationLabel: 'approves', kind: 'QUESTION', isPropertyOfTarget: false }],
+  relationships: [],
+  questions: [{ text: 'How long does a refund take?', usefulness: 4 }, { text: 'Can a refund be partial?', usefulness: 3 }],
+}, 5).model;
+const listQ = qModel.questions.find((q) => q.text === 'How long does a refund take?')!;
+const otherQ = qModel.questions.find((q) => q.text === 'Can a refund be partial?')!;
+const askBox = qModel.concepts.find((c) => c.kind === 'QUESTION')!;
+
+const qSaved = saveQuestion(qModel, listQ.id, '2026-10-25T10:00:00Z');
+check('a raised question can be saved and stays open', Boolean(qSaved.questions.find((q) => q.id === listQ.id)!.savedAt) && qSaved.questions.find((q) => q.id === listQ.id)!.status === 'OPEN');
+check('saving is logged', qSaved.log.at(-1)?.kind === 'question');
+check('saving it again keeps the first time', saveQuestion(qSaved, listQ.id, '2026-10-26T10:00:00Z').questions.find((q) => q.id === listQ.id)!.savedAt === '2026-10-25T10:00:00Z');
+check('a saved question can be removed from the list', !unsaveQuestion(qSaved, listQ.id).questions.find((q) => q.id === listQ.id)!.savedAt);
+const reopened = saveQuestion(dismissQuestion(qModel, otherQ.id), otherQ.id);
+check('saving a dismissed question brings it back', reopened.questions.find((q) => q.id === otherQ.id)!.status === 'OPEN' && !reopened.questions.find((q) => q.id === otherQ.id)!.dismissedAt);
+check('an unknown id changes nothing', saveQuestion(qModel, 'q_nope') === qModel);
+
+const ownAdded = addQuestion(qModel, '  Who pays   the deposit?  ', 'c_nope');
+const ownQ = ownAdded.questions.at(-1)!;
+check('a question in your own words is tidied and saved', ownQ.text === 'Who pays the deposit?' && Boolean(ownQ.savedAt) && ownQ.status === 'OPEN');
+check('an anchor that is not on the map is dropped', ownQ.anchorId === '');
+check('the same question again is not added twice', addQuestion(ownAdded, 'who pays the deposit?').questions.length === ownAdded.questions.length);
+check('an empty question is ignored', addQuestion(qModel, '   ') === qModel);
+
+const fromBox = questionFromConcept(qModel, askBox.id);
+const boxQ = fromBox.questions.find((q) => q.text === askBox.label)!;
+check('a question box on the map is kept as a saved question', Boolean(boxQ?.savedAt));
+check('it points back at what it hangs off, and keeps why it matters', boxQ.anchorId === refund.id && boxQ.why === askBox.note, `${boxQ.anchorId} / ${boxQ.why}`);
+check('the box itself stays on the map', fromBox.concepts.some((c) => c.id === askBox.id && c.status !== 'REJECTED'));
+check('only a question box can be kept this way', questionFromConcept(qModel, refund.id) === qModel);
+
+const qMd = questionsMarkdown({ ...fromBox, title: 'Refunds' });
+check('the list leaves as Markdown, numbered, with what each is about', qMd.startsWith('# Questions: Refunds') && qMd.includes('1. Who approves a refund?') && qMd.includes('About: Refund'), qMd);
+
+const unjoined: Model = {
+  ...qModel,
+  clusters: [{ id: 'cl_1', label: 'Refunds', memberIds: [refund.id], origin: 'INFERRED', confirmed: false }],
+  concepts: qModel.concepts.map((c) => (c.id === refund.id ? { ...c, clusterId: 'cl_1' } : c)),
+};
+const joined = joinAreas(unjoined);
+check('a late guess joins the area of what it hangs off', joined.concepts.find((c) => c.id === askBox.id)!.clusterId === 'cl_1' && joined.clusters[0].memberIds.includes(askBox.id));
 
 console.log(`\n${pass} passed, ${fail} failed.\n`);
 if (fail > 0) process.exit(1);

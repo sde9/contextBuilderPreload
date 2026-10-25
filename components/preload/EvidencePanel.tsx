@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { usePreload } from '@/lib/preloadStore';
 import { ROLE_LABEL } from '@/lib/types';
+import { sourcesOf } from '@/lib/merge';
 
 const SHORT = 420;
 
@@ -18,7 +19,19 @@ function SectionText({ text }: { text: string }) {
   const shown = !long || open ? text : `${text.slice(0, space > SHORT - 120 ? space : SHORT)}…`;
   return (
     <>
-      <blockquote>{shown}</blockquote>
+      <blockquote>
+        {blocks(shown).map((b, i) =>
+          b.heading ? (
+            <span key={i} className="quote-h">
+              {b.text}
+            </span>
+          ) : (
+            <span key={i} className="quote-p">
+              {b.text}
+            </span>
+          )
+        )}
+      </blockquote>
       {long && (
         <button className="quote-more" onClick={() => setOpen(!open)}>
           {open ? 'Show less' : 'Show the whole section'}
@@ -26,6 +39,23 @@ function SectionText({ text }: { text: string }) {
       )}
     </>
   );
+}
+
+/*
+ * Word and PDF sections arrive with their headings marked "#", as the reader
+ * keeps the structure. Show a heading as a heading, not as "# 5.2 ...".
+ */
+function blocks(text: string): { heading: boolean; text: string }[] {
+  const out: { heading: boolean; text: string }[] = [];
+  for (const para of text.split(/\n\s*\n/)) {
+    const lines = para.split('\n');
+    while (lines.length && /^#{1,6}\s/.test(lines[0].trim())) {
+      out.push({ heading: true, text: lines.shift()!.trim().replace(/^#{1,6}\s+/, '') });
+    }
+    const rest = lines.join('\n').trim();
+    if (rest) out.push({ heading: false, text: rest });
+  }
+  return out;
 }
 
 /*
@@ -43,6 +73,8 @@ export default function EvidencePanel() {
   const reject = usePreload((s) => s.reject);
   const split = usePreload((s) => s.split);
   const resolve = usePreload((s) => s.resolve);
+  const saveQuestion = usePreload((s) => s.saveConceptQuestion);
+  const questions = usePreload((s) => s.model?.questions ?? []);
 
   if (!model || !selectedId) return null;
   const concept = model.concepts.find((c) => c.id === selectedId);
@@ -79,8 +111,20 @@ export default function EvidencePanel() {
         </button>
       </div>
 
+      {concept.skeleton && (
+        <p className="ev-skeleton">{concept.skeleton === 'MAIN' ? 'The main point of the document' : `Part ${(concept.order ?? 0) + 1} of the document`}</p>
+      )}
       <h2 className="ev-label">{concept.label}</h2>
       {concept.note && <p className="ev-note">{concept.note}</p>}
+      {concept.kind === 'QUESTION' && (
+        <div className="ev-actions">
+          {questions.some((q) => q.savedAt && q.status === 'OPEN' && q.text.trim().toLowerCase() === concept.label.trim().toLowerCase()) ? (
+            <span className="ev-fine">Saved in the questions to ask.</span>
+          ) : (
+            <button onClick={() => void saveQuestion(concept.id)}>Save to the questions to ask</button>
+          )}
+        </div>
+      )}
 
       {contested && (
         <>
@@ -142,7 +186,8 @@ export default function EvidencePanel() {
       {absorbed && concept.status !== 'CONTESTED' && (
         <div className="ev-merged">
           <p>
-            Merged from {concept.mergedFrom.length + 1} concepts found in different documents.
+            Merged from {concept.mergedFrom.length + 1} concepts
+            {sourcesOf(model, concept).length > 1 ? ' found in different documents.' : ' that say the same thing in one document.'}
           </p>
           <button onClick={() => void split(concept.id, absorbed)}>Split the last merge</button>
         </div>

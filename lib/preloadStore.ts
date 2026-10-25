@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import type { Blocked, Model, SourceRole } from './types';
 import { noBlocks, normaliseModel } from './types';
 import type { Level } from './cluster';
+import type { StoryMode } from './story';
 import { MAX_FILES, MAX_UPLOAD_BYTES, UPLOAD_LIMIT, megabytes } from './limits';
 
 /*
@@ -33,6 +34,12 @@ type State = {
   selectedSources: string[];
   selectedConcept: string;
 
+  /** The slider. Null step means the whole map, no story. */
+  storyMode: StoryMode;
+  storyStep: number | null;
+  /** The questions panel on the right. */
+  questionsOpen: boolean;
+
   /** Ask the server whether it has somewhere to keep runs. */
   checkHealth: () => Promise<void>;
   create: (files: File[], title: string) => Promise<void>;
@@ -46,6 +53,18 @@ type State = {
   reject: (conceptId: string) => Promise<void>;
   split: (conceptId: string, absorbedId: string) => Promise<void>;
   resolve: (conceptId: string, choice: 'KEPT_FIRST' | 'KEPT_SECOND' | 'SPLIT') => Promise<void>;
+
+  confirmRelationship: (relationshipId: string) => Promise<void>;
+  rejectRelationship: (relationshipId: string) => Promise<void>;
+  saveQuestion: (questionId: string) => Promise<void>;
+  unsaveQuestion: (questionId: string) => Promise<void>;
+  dismissQuestion: (questionId: string) => Promise<void>;
+  addQuestion: (text: string, anchorId?: string) => Promise<void>;
+  saveConceptQuestion: (conceptId: string) => Promise<void>;
+  downloadQuestions: () => void;
+  setStoryMode: (mode: StoryMode) => void;
+  setStoryStep: (step: number | null) => void;
+  toggleQuestions: (open?: boolean) => void;
 
   setLevel: (level: Level) => void;
   toggleCluster: (clusterId: string) => void;
@@ -72,13 +91,43 @@ async function readBody(res: Response): Promise<{ error?: string } & Record<stri
   }
 }
 
+/*
+ * Same fix as the live store (RT-US-15): the link is attached to the page and
+ * the URL revoked later, so no browser opens the file in place of the map.
+ */
 function saveTextFile(filename: string, mime: string, content: string): void {
   const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  a.href = url;
   a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 1500);
+}
+
+function fileBase(title: string): string {
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+  const safe = title.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 40) || 'preload';
+  return `${stamp}_${safe}`;
+}
+
+/** The saved questions as a list a person can print or paste, grouped by what they are about. */
+export function questionsMarkdown(model: Model): string {
+  const saved = model.questions.filter((q) => q.savedAt && q.status === 'OPEN');
+  const label = new Map(model.concepts.map((c) => [c.id, c.label]));
+  const lines = [`# Questions: ${model.title}`, '', `${saved.length} saved, ${new Date().toLocaleDateString()}`, ''];
+  saved.forEach((q, i) => {
+    lines.push(`${i + 1}. ${q.text}`);
+    const about = q.anchorId ? label.get(q.anchorId) : '';
+    if (about) lines.push(`   About: ${about}`);
+    if (q.why) lines.push(`   Why: ${q.why}`);
+  });
+  return lines.join('\n') + '\n';
 }
 
 export const usePreload = create<State>((set, get) => ({
@@ -94,6 +143,9 @@ export const usePreload = create<State>((set, get) => ({
   openClusters: [],
   selectedSources: [],
   selectedConcept: '',
+  storyMode: 'LOGIC',
+  storyStep: null,
+  questionsOpen: false,
 
   checkHealth: async () => {
     try {
@@ -281,6 +333,25 @@ export const usePreload = create<State>((set, get) => ({
   },
   split: async (conceptId, absorbedId) => get().act({ kind: 'split', conceptId, absorbedId }),
   resolve: async (conceptId, choice) => get().act({ kind: 'resolve', conceptId, choice }),
+  confirmRelationship: async (relationshipId) => get().act({ kind: 'confirm-rel', relationshipId }),
+  rejectRelationship: async (relationshipId) => get().act({ kind: 'reject-rel', relationshipId }),
+  saveQuestion: async (questionId) => get().act({ kind: 'question-save', questionId }),
+  unsaveQuestion: async (questionId) => get().act({ kind: 'question-unsave', questionId }),
+  dismissQuestion: async (questionId) => get().act({ kind: 'question-dismiss', questionId }),
+  addQuestion: async (text, anchorId) => get().act({ kind: 'question-add', text, anchorId: anchorId ?? '' }),
+  saveConceptQuestion: async (conceptId) => get().act({ kind: 'question-from-concept', conceptId }),
+  downloadQuestions: () => {
+    const m = get().model;
+    if (!m) return;
+    saveTextFile(`${fileBase(m.title)}.questions.md`, 'text/markdown', questionsMarkdown(m));
+  },
+  setStoryMode: (storyMode) => set({ storyMode, storyStep: get().storyStep === null ? null : 0 }),
+  setStoryStep: (storyStep) => set({ storyStep }),
+  toggleQuestions: (open) =>
+    set((s) => {
+      const next = open ?? !s.questionsOpen;
+      return { questionsOpen: next, selectedConcept: next ? '' : s.selectedConcept };
+    }),
 
   setLevel: (level) => set({ level, openClusters: level === 3 ? [] : get().openClusters }),
   toggleCluster: (clusterId) =>
@@ -295,7 +366,11 @@ export const usePreload = create<State>((set, get) => ({
         ? s.selectedSources.filter((c) => c !== sourceId)
         : [...s.selectedSources, sourceId],
     })),
-  select: (conceptId) => set((s) => ({ selectedConcept: s.selectedConcept === conceptId ? '' : conceptId })),
+  select: (conceptId) =>
+    set((s) => ({
+      selectedConcept: s.selectedConcept === conceptId ? '' : conceptId,
+      questionsOpen: s.selectedConcept === conceptId ? s.questionsOpen : false,
+    })),
 
   reset: () => {
     if (typeof window !== 'undefined') window.history.replaceState(null, '', window.location.pathname);
@@ -309,14 +384,14 @@ export const usePreload = create<State>((set, get) => ({
       openClusters: [],
       selectedSources: [],
       selectedConcept: '',
+      storyStep: null,
+      questionsOpen: false,
     });
   },
 
   download: () => {
     const m = get().model;
     if (!m) return;
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
-    const safe = m.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || 'preload';
-    saveTextFile(`${stamp}_${safe}.context.json`, 'application/json', JSON.stringify(m, null, 2));
+    saveTextFile(`${fileBase(m.title)}.context.json`, 'application/json', JSON.stringify(m, null, 2));
   },
 }));

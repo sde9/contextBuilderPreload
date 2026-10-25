@@ -259,6 +259,18 @@ async function fullRun(label: string) {
   const again = await body(await runIdRoute.GET(new Request('http://local'), params(id)));
   check('and is still there when the run is reopened', again.model.concepts.find((c: any) => c.id === target.id).status === 'REJECTED');
 
+  const raised = again.model.questions.find((q: any) => q.status === 'OPEN');
+  const savedRes = await body(await actRoute.POST(json({ runId: id, action: { kind: 'question-save', questionId: raised.id } })));
+  check('a question the map raised is saved to the run', Boolean(savedRes.model.questions.find((q: any) => q.id === raised.id).savedAt));
+  const addedRes = await body(await actRoute.POST(json({ runId: id, action: { kind: 'question-add', text: 'Who signs off a refund over $500?' } })));
+  check('a question in your own words is saved to the run', addedRes.model.questions.some((q: any) => q.text === 'Who signs off a refund over $500?' && q.savedAt));
+  const longRes = await body(await actRoute.POST(json({ runId: id, action: { kind: 'question-add', text: 'x'.repeat(2000) } })));
+  check('a very long question is cut to 500 characters', longRes.model.questions.at(-1).text.length === 500);
+  await actRoute.POST(json({ runId: id, action: { kind: 'question-unsave', questionId: raised.id } }));
+  const dismissed = await body(await actRoute.POST(json({ runId: id, action: { kind: 'question-dismiss', questionId: raised.id } })));
+  check('a raised question can be dismissed', dismissed.model.questions.find((q: any) => q.id === raised.id).status === 'DONE');
+  const reread = await body(await runIdRoute.GET(new Request('http://local'), params(id)));
+  check('the saved list survives reopening the run', reread.model.questions.filter((q: any) => q.savedAt && q.status === 'OPEN').length === 2);
 
   const list = await body(await runRoute.GET());
   check('the run is listed', list.runs.some((r: any) => r.id === id && r.stage === 'READY'));

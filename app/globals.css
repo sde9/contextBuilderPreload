@@ -82,63 +82,101 @@ button:disabled { opacity: 0.45; cursor: default; }
 .k-orange { color: var(--orange); font-weight: 600; }
 
 /* ---------------------------------------------------------------- nodes */
+/*
+ * Three axes, one channel each. Status is colour plus border style plus a
+ * badge. Kind is the silhouette. Importance is size. See ConceptNode.tsx.
+ */
 
 .node {
   position: relative;
   min-width: 140px; max-width: 220px;
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 10px 13px;
   font-size: 14px;
-  background: #fff;
+  background: var(--node-fill, #fff);
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 }
-.node-validated { border: 2px solid var(--green); background: var(--green-bg); color: var(--green-ink); }
-.node-proposed  { border: 2px dashed var(--orange); background: var(--orange-bg); color: var(--orange-ink); opacity: 0.96; }
+.node-validated { --node-fill: var(--green-bg); --node-stroke: var(--green); border: 2px solid var(--green); color: var(--green-ink); }
+.node-proposed  { --node-fill: var(--orange-bg); --node-stroke: var(--orange); border: 2px dashed var(--orange); color: var(--orange-ink); opacity: 0.96; }
 
-.node-label { font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
-.node-note { margin-top: 5px; font-size: 11px; opacity: 0.75; line-height: 1.4; }
+.node-label {
+  font-weight: 600; line-height: 1.35; letter-spacing: -0.01em;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
+}
+.node-note {
+  margin-top: 5px; font-size: 11px; opacity: 0.78; line-height: 1.4;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
+/* A fixed width on a map with a skeleton, so a column lines up. */
+.node-fixed .node { min-width: 0; max-width: none; width: 100%; }
 
 /* ---------------------------------------------------------------- kinds */
-/* Shape is a second axis, independent of validated/proposed colour. */
+/* Silhouette per kind, independent of the status colour. */
 
 .kind-tag {
-  position: absolute; top: -9px; left: 10px; z-index: 1;
-  font-size: 8.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  position: absolute; top: -9px; left: 10px; z-index: 2;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.02em;
   background: #fff; color: var(--muted);
   border: 1px solid var(--line); border-radius: 4px;
-  padding: 0 5px; line-height: 14px;
+  padding: 0 5px; line-height: 15px;
 }
 
+/* thing: a plain box */
+.node-entity { border-radius: 10px; }
+
+/* detail: a small chip */
 .node-attribute {
   min-width: 0; max-width: 170px;
   padding: 5px 9px;
   border-width: 1px !important;
+  border-radius: 6px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
 }
-.node-attribute .node-label { font-size: 11px; }
-.node-attribute .node-note { font-size: 9.5px; margin-top: 2px; }
-.node-attribute .kind-tag { font-size: 7.5px; top: -7px; left: 7px; padding: 0 4px; line-height: 12px; }
+.node-attribute .node-label { font-size: 11.5px; }
+.node-attribute .node-note { font-size: 10px; margin-top: 2px; }
+.node-attribute .kind-tag { font-size: 8px; top: -8px; left: 7px; padding: 0 4px; line-height: 13px; }
 
+/* who: a pill */
 .node-actor { border-radius: 999px; padding: 10px 22px; }
+.node-actor .kind-tag { left: 18px; }
 
-.node-step { border-radius: 4px; padding-left: 24px; }
-.node-step .node-label { position: relative; }
-.node-step .node-label::before { content: '▸'; position: absolute; left: -14px; opacity: 0.7; }
-
-.node-rule {
-  clip-path: polygon(14px 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 14px 100%, 0 50%);
-  padding-left: 22px; padding-right: 22px;
+/* step and rule: drawn as an outline behind the text, border intact */
+.node-shaped { border-color: transparent !important; background: transparent !important; box-shadow: none; }
+.node-shape {
+  position: absolute; left: -2px; top: -2px; width: calc(100% + 4px); height: calc(100% + 4px);
+  z-index: 0; overflow: visible; pointer-events: none;
+  filter: drop-shadow(0 2px 5px rgba(15, 23, 42, 0.08));
 }
+.node-shape path { fill: var(--node-fill); stroke: var(--node-stroke); stroke-width: 2px; }
+.node-proposed .node-shape path { stroke-dasharray: 6 4; }
+/* Only the text is lifted above the outline. A wider selector also caught the
+   connection handles, put them in the flow and made every step and rule box
+   tall and bottom-heavy. */
+.node-shaped > .node-label, .node-shaped > .node-note, .node-shaped > .node-actions { position: relative; z-index: 1; }
+.node-step { padding: 10px 30px 10px 22px; }
+.node-rule { padding: 11px 20px; }
 
-.node-question, .node-problem {
-  min-width: 200px; max-width: 280px;
-  padding: 14px 16px 12px;
-  border-left-width: 6px !important;
-}
-.node-question .node-label,
-.node-problem .node-label { font-size: 18.9px; font-weight: 700; line-height: 1.3; letter-spacing: -0.01em; }
-.node-question { border-left-color: var(--question) !important; }
-.node-problem  { border-left-color: var(--problem) !important; }
+/* claim: a statement, a box with a thick bar down its left side */
+.node-claim { border-radius: 4px; border-left-width: 7px !important; max-width: 260px; }
+.node-claim .node-label { font-weight: 600; }
+
+/* question: a speech bubble */
+.node-question { border-radius: 16px 16px 16px 4px; min-width: 180px; max-width: 260px; padding: 11px 14px; }
+.node-question .node-label::before { content: '?'; display: inline-block; margin-right: 6px; width: 17px; height: 17px; line-height: 17px; text-align: center; border-radius: 50%; background: var(--question); color: #fff; font-size: 11px; font-weight: 700; vertical-align: 1px; }
+
+/* problem: a box with a red top */
+.node-problem { border-radius: 6px; border-top-width: 6px !important; border-top-color: var(--problem) !important; min-width: 180px; max-width: 260px; }
+
+/* importance: the main point and the parts are larger than their details */
+.node-main { max-width: none; min-width: 260px; padding: 16px 20px 14px; border-width: 3px !important; box-shadow: 0 6px 22px rgba(15, 23, 42, 0.14); }
+.node-main .node-label { font-size: 19px; line-height: 1.3; }
+.node-main .node-note { font-size: 12.5px; }
+.node-main .kind-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink); border-color: var(--ink); }
+.node-part { max-width: none; min-width: 200px; padding: 13px 16px 12px; border-width: 2.5px !important; box-shadow: 0 4px 14px rgba(15, 23, 42, 0.11); }
+.node-part .node-label { font-size: 16px; }
+.node-part .node-note { font-size: 11.5px; }
+.node-part .kind-tag { color: var(--ink); }
+.node-main.node-shaped .node-shape path, .node-part.node-shaped .node-shape path { stroke-width: 3px; }
 
 .badge {
   display: inline-block; margin-left: 6px;
@@ -147,6 +185,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   border-radius: 50%; background: var(--orange); color: #fff;
   vertical-align: 1px;
 }
+.badge-saved { background: var(--question); }
 
 .node-actions { display: flex; gap: 6px; margin-top: 8px; }
 .node-actions button { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; }
@@ -226,24 +265,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   padding: 10px 18px 14px;
 }
 .legend { font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
-
-.kind-legend {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
-  font-size: 11px; color: var(--muted);
-  margin-bottom: 8px;
-}
-.kind-legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.kind-swatch {
-  display: inline-block; width: 16px; height: 11px;
-  border: 1.5px solid #94a3b8; background: #fff; flex: 0 0 auto;
-}
-.kind-swatch-entity { border-radius: 3px; }
-.kind-swatch-attribute { width: 12px; height: 8px; border-width: 1px; }
-.kind-swatch-actor { border-radius: 999px; }
-.kind-swatch-step { border-radius: 2px; clip-path: polygon(0 0, 75% 0, 100% 50%, 75% 100%, 0 100%); }
-.kind-swatch-rule { clip-path: polygon(18% 0, 82% 0, 100% 50%, 82% 100%, 18% 100%, 0 50%); }
-.kind-swatch-question { border-color: var(--question); border-width: 2px; }
-.kind-swatch-problem { border-color: var(--problem); border-width: 2px; }
+.bottom > .shape-legend { margin-bottom: 8px; }
 
 .composer { max-width: 980px; margin: 0 auto; }
 .composer-row { display: flex; gap: 10px; align-items: stretch; }
@@ -497,7 +519,7 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
 .node-dim { opacity: .22; }
 .node-picked .node { outline: 2px solid var(--ink); outline-offset: 3px; }
 
-.node-contested { background: var(--contested-bg); border-color: var(--contested); border-style: solid; border-width: 2px; }
+.node-contested { --node-fill: var(--contested-bg); --node-stroke: var(--contested); background: var(--contested-bg); border-color: var(--contested); border-style: solid; border-width: 2px; }
 .node-contested .node-label { color: var(--contested-ink); }
 /* Never colour alone: a hatched fill carries the same message. */
 .node-contested::after {
@@ -522,6 +544,9 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
 .quote-contested { border-color: #fecaca; }
 .quote-meta { font-size: 10.5px; color: var(--muted); margin-bottom: 6px; }
 .quote blockquote { margin: 0; font-size: 13.5px; line-height: 1.5; font-style: italic; white-space: pre-line; overflow-wrap: anywhere; }
+.quote-h { display: block; font-style: normal; font-weight: 600; font-size: 12.5px; margin: 0 0 4px; }
+.quote-p { display: block; }
+.quote-p + .quote-p, .quote-p + .quote-h { margin-top: 8px; }
 .quote-more { border: 0; background: none; padding: 6px 0 0; font-size: 11.5px; color: var(--muted); text-decoration: underline; cursor: pointer; }
 .quote-label { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 .ev-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
@@ -529,8 +554,10 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
 .ev-fine { font-size: 11.5px; color: var(--muted); line-height: 1.5; margin: 6px 0 0; }
 .ev-merged { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; }
 .ev-merged p { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; }
+.ev-merged button { font-size: 12px; padding: 5px 10px; }
 
-.bottom-preload { justify-content: space-between; }
+.bottom-preload { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 22px; }
+.bottom-preload .legend { margin-bottom: 0; }
 .legend-right { color: var(--muted); }
 
 @media (max-width: 1100px) {
@@ -538,3 +565,92 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
   .evidence { width: 280px; }
   .intake { grid-template-columns: minmax(0,1fr) 280px; }
 }
+
+
+/* ---------------------------------------------------------------- the story */
+/*
+ * The slider. What has been shown stays as it is, the current step is lit,
+ * and what is still to come is a pale outline with no text, so the shape of
+ * the whole map is there from the first step.
+ */
+.react-flow__node.story-past, .react-flow__node.story-current, .react-flow__node.story-future { transition: opacity .25s ease; }
+@media (prefers-reduced-motion: reduce) { .react-flow__node.story-past, .react-flow__node.story-current, .react-flow__node.story-future { transition: none; } }
+
+.story-current .node, .story-current .cluster-node { box-shadow: 0 0 0 4px rgba(37, 99, 235, .28), 0 6px 22px rgba(15, 23, 42, .16); }
+.story-current .node-shaped .node-shape { filter: drop-shadow(0 0 5px rgba(37, 99, 235, .45)); }
+
+.story-future .node, .story-future .cluster-node {
+  background: transparent !important; box-shadow: none !important;
+  border-color: #cbd5e1 !important; border-style: dashed !important;
+}
+.story-future .node > :not(.node-shape), .story-future .cluster-node > * { visibility: hidden; }
+/* A step or a rule is drawn by its outline alone: no box around the arrow. */
+.story-future .node-shaped { border-color: transparent !important; }
+.story-future .node-shape { filter: none; }
+.story-future .node-shape path { fill: transparent; stroke: #cbd5e1; stroke-dasharray: 4 4; }
+.story-future .node-problem { border-top-color: #cbd5e1 !important; }
+
+/* Opacity on the whole link, so the arrowhead fades with the line. */
+.react-flow__edge.story-edge-future { opacity: .14; }
+.edge-label-current { box-shadow: 0 0 0 2px rgba(37, 99, 235, .35), 0 1px 3px rgba(15, 23, 42, .1); }
+
+.story-panel { margin-bottom: 14px !important; width: min(760px, calc(100% - 140px)); }
+.story-bar {
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(15, 23, 42, .12);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+}
+.story-row { display: flex; align-items: center; gap: 8px; }
+.story-modes { display: flex; gap: 2px; background: #f1f5f9; border-radius: 7px; padding: 2px; flex: 0 0 auto; }
+.story-modes button { border: 0; background: none; font-size: 12px; padding: 4px 9px; border-radius: 5px; color: var(--muted); }
+.story-modes .story-mode-on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(15,23,42,.12); }
+.story-btn { width: 28px; height: 28px; padding: 0; border-radius: 6px; font-size: 16px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.story-play { font-size: 12px; }
+.story-range { flex: 1 1 auto; min-width: 80px; accent-color: #2563eb; }
+.story-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 54px; text-align: right; }
+.story-all { font-size: 12px; padding: 4px 9px; white-space: nowrap; }
+.story-caption {
+  display: flex; gap: 10px; align-items: baseline; text-align: left;
+  border: 0; background: #f8fafc; border-radius: 7px; padding: 6px 10px; font-size: 13px; cursor: pointer;
+  min-width: 0;
+}
+.story-caption strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; flex: 0 0 auto; }
+.story-quote { color: var(--muted); font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* ---------------------------------------------------------------- questions */
+/* The pill that opens the questions keeps its colour; the global button hover
+   would otherwise paint it light grey, white text and all. */
+.pill-button { cursor: pointer; font: inherit; font-size: 12px; }
+.pill-button.pill-plain { background: #fff; }
+.pill-button.pill-orange:hover:not(:disabled) { background: #ffedd5; }
+.pill-on, .pill-on:hover:not(:disabled) { background: var(--ink); color: #fff; border-color: var(--ink); }
+.questions .q-title { font-size: 14px; margin: 14px 0 8px; }
+.questions .q-title-gap { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 14px; }
+.q-list { margin: 0; padding-left: 0; list-style: none; }
+.q-saved { padding-left: 18px; list-style: decimal; }
+.q-list li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.q-text { font-weight: 500; line-height: 1.4; }
+.q-meta { margin-top: 3px; font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; line-height: 1.4; }
+.q-anchor { border: 0; background: none; padding: 0; color: #2563eb; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
+.q-actions { display: flex; gap: 6px; margin-top: 6px; }
+.q-actions button { font-size: 11.5px; padding: 3px 9px; }
+.q-add { display: flex; gap: 6px; margin-top: 12px; }
+.q-add input { flex: 1; min-width: 0; font: inherit; font-size: 12.5px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.q-add button { font-size: 12px; }
+
+/* ---------------------------------------------------------------- legend, rail, evidence */
+.shape-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.shape-key { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.shape-chip { position: relative; display: inline-block; width: 22px; height: 13px; border: 1.5px solid var(--muted); border-radius: 3px; background: #fff; }
+.chip-attribute { width: 15px; height: 9px; border-width: 1px; border-radius: 2px; }
+.chip-actor { border-radius: 99px; }
+.chip-claim { border-left-width: 4px; border-radius: 2px; }
+.chip-question { border-radius: 7px 7px 7px 2px; }
+.chip-problem { border-top: 3px solid var(--problem); border-radius: 2px; }
+.chip-step, .chip-rule { border-color: transparent; background: transparent; }
+.shape-chip svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.shape-chip svg path { fill: #fff; stroke: var(--muted); stroke-width: 1.5px; }
+.shape-size { display: inline-block; width: 12px; height: 9px; border: 1.5px solid var(--muted); border-radius: 2px; box-shadow: 9px -3px 0 -1px #fff, 9px -3px 0 0 var(--muted); margin-right: 8px; }
+
+.src-warn { grid-column: 1 / 3; font-size: 11px; color: var(--contested); margin-top: 3px; white-space: normal; line-height: 1.35; }
+.ev-skeleton { margin: 8px 0 -4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }

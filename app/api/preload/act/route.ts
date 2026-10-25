@@ -1,6 +1,16 @@
 import { NextResponse } from 'next/server';
 import { RUN_MISSING, loadRun, saveRun } from '@/lib/runStore';
-import { confirmConcept, rejectConcept } from '@/lib/reducer';
+import {
+  addQuestion,
+  confirmConcept,
+  confirmRelationship,
+  dismissQuestion,
+  questionFromConcept,
+  rejectConcept,
+  rejectRelationship,
+  saveQuestion,
+  unsaveQuestion,
+} from '@/lib/reducer';
 import { resolveContest, splitConcept } from '@/lib/merge';
 import type { Model, SourceRole } from '@/lib/types';
 
@@ -20,7 +30,14 @@ type Action =
   | { kind: 'split'; conceptId: string; absorbedId: string }
   | { kind: 'resolve'; conceptId: string; choice: 'KEPT_FIRST' | 'KEPT_SECOND' | 'SPLIT' }
   | { kind: 'role'; sourceId: string; role: SourceRole }
-  | { kind: 'title'; title: string };
+  | { kind: 'title'; title: string }
+  | { kind: 'confirm-rel'; relationshipId: string }
+  | { kind: 'reject-rel'; relationshipId: string }
+  | { kind: 'question-save'; questionId: string }
+  | { kind: 'question-unsave'; questionId: string }
+  | { kind: 'question-dismiss'; questionId: string }
+  | { kind: 'question-add'; text: string; anchorId?: string }
+  | { kind: 'question-from-concept'; conceptId: string };
 
 export async function POST(req: Request) {
   try {
@@ -35,6 +52,13 @@ export async function POST(req: Request) {
     if (action.kind === 'split') next = splitConcept(model, action.conceptId, action.absorbedId);
     if (action.kind === 'resolve') next = resolveContest(model, action.conceptId, action.choice);
     if (action.kind === 'title') next = { ...model, title: action.title.trim() || model.title };
+    if (action.kind === 'confirm-rel') next = confirmRelationship(model, action.relationshipId);
+    if (action.kind === 'reject-rel') next = rejectRelationship(model, action.relationshipId);
+    if (action.kind === 'question-save') next = saveQuestion(model, action.questionId);
+    if (action.kind === 'question-unsave') next = unsaveQuestion(model, action.questionId);
+    if (action.kind === 'question-dismiss') next = dismissQuestion(model, action.questionId);
+    if (action.kind === 'question-add') next = addQuestion(model, String(action.text ?? '').slice(0, 500), action.anchorId ?? '');
+    if (action.kind === 'question-from-concept') next = questionFromConcept(model, action.conceptId);
     if (action.kind === 'role') {
       // R9. The user owns this answer, and the merge uses it as the tiebreaker.
       next = {

@@ -753,3 +753,74 @@ export function contextPayload(m: Model) {
     recentStatements: m.statements.slice(-3).map((s) => s.text),
   };
 }
+
+// ------------------------------------------------------------------ preload: questions to ask
+
+/*
+ * The list a person walks into the interview holding. A question the map
+ * raised can be kept, a kept one can be dropped again, and a person can add
+ * their own. Kept questions stay OPEN, so the live session still sees them.
+ */
+
+function logQuestion(model: Model, payload: Record<string, unknown>, at: string): LogEntry[] {
+  return [...model.log, { turn: model.turn, at, kind: 'question', payload }];
+}
+
+export function saveQuestion(model: Model, questionId: string, at = new Date().toISOString()): Model {
+  if (!model.questions.some((q) => q.id === questionId)) return model;
+  return {
+    ...model,
+    questions: model.questions.map((q) =>
+      q.id === questionId ? { ...q, savedAt: q.savedAt || at, status: 'OPEN' as const, dismissedAt: '' } : q
+    ),
+    log: logQuestion(model, { action: 'save', questionId }, at),
+  };
+}
+
+export function unsaveQuestion(model: Model, questionId: string, at = new Date().toISOString()): Model {
+  if (!model.questions.some((q) => q.id === questionId)) return model;
+  return {
+    ...model,
+    questions: model.questions.map((q) => (q.id === questionId ? { ...q, savedAt: '' } : q)),
+    log: logQuestion(model, { action: 'unsave', questionId }, at),
+  };
+}
+
+/** A question in the person's own words. Saved straight away; a repeat saves the existing one. */
+export function addQuestion(model: Model, text: string, anchorId = '', at = new Date().toISOString()): Model {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return model;
+  const existing = model.questions.find((q) => norm(q.text) === norm(clean));
+  if (existing) return saveQuestion(model, existing.id, at);
+  const question: Question = {
+    id: newId('q'),
+    text: clean,
+    why: '',
+    usefulness: 3,
+    status: 'OPEN',
+    turn: model.turn,
+    dismissedAt: '',
+    savedAt: at,
+    anchorId: anchorId && model.concepts.some((c) => c.id === anchorId) ? anchorId : '',
+  };
+  return {
+    ...model,
+    questions: [...model.questions, question],
+    log: logQuestion(model, { action: 'add', questionId: question.id }, at),
+  };
+}
+
+/**
+ * A QUESTION box on the map, kept as a question in the list. The box stays
+ * where it is; the list item points back at what it hangs off.
+ */
+export function questionFromConcept(model: Model, conceptId: string, at = new Date().toISOString()): Model {
+  const c = model.concepts.find((x) => x.id === conceptId);
+  if (!c || c.kind !== 'QUESTION') return model;
+  const link = model.relationships.find((r) => r.status !== 'REJECTED' && (r.from === c.id || r.to === c.id));
+  const anchorId = link ? (link.from === c.id ? link.to : link.from) : '';
+  const next = addQuestion(model, c.label, anchorId, at);
+  const added = next.questions.find((q) => norm(q.text) === norm(c.label));
+  if (!added || added.why || !c.note) return next;
+  return { ...next, questions: next.questions.map((q) => (q.id === added.id ? { ...q, why: c.note } : q)) };
+}
