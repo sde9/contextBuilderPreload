@@ -161,7 +161,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 .node-claim .node-label { font-weight: 600; }
 
 /* question: a speech bubble */
-.node-question { border-radius: 16px 16px 16px 4px; min-width: 180px; max-width: 260px; padding: 11px 14px; }
+.node-question { border-radius: 16px 16px 16px 4px; min-width: 220px; max-width: 260px; padding: 11px 14px; }
 .node-question .node-label::before { content: '?'; display: inline-block; margin-right: 6px; width: 17px; height: 17px; line-height: 17px; text-align: center; border-radius: 50%; background: var(--question); color: #fff; font-size: 11px; font-weight: 700; vertical-align: 1px; }
 
 /* problem: a box with a red top */
@@ -189,6 +189,18 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 .node-actions { display: flex; gap: 6px; margin-top: 8px; }
 .node-actions button { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; }
+
+/* A question takes an answer, not a yes or no. */
+.node-answer { flex-direction: column; gap: 6px; cursor: default; }
+.node-answer-input {
+  width: 100%; min-height: 44px; resize: vertical; box-sizing: border-box;
+  font: inherit; font-size: 12.5px; line-height: 1.35; padding: 6px 8px;
+  border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: inherit;
+}
+.node-answer-input:focus { outline: 2px solid var(--question); outline-offset: 0; border-color: var(--question); }
+.node-answer-input:disabled { background: #f8fafc; color: var(--muted); }
+.node-answer-row { display: flex; gap: 6px; }
+.node-answer-note { font-size: 11px; line-height: 1.35; color: var(--muted); }
 .btn-yes { border-color: var(--green); color: var(--green); background: #fff; }
 .btn-yes:hover:not(:disabled) { background: var(--green); color: #fff; }
 .btn-no { border-color: #cbd5e1; color: var(--muted); background: #fff; }

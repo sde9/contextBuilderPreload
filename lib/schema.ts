@@ -227,6 +227,82 @@ export const PROPOSE_RT_JSON_SCHEMA = {
   },
 } as const;
 
+// ---------------------------------------------------------------- Answers
+
+/*
+ * AnswerPatch. The person answered a QUESTION box on the map, in either mode.
+ *
+ * The first two arrays are ExtractPatch exactly: what the answer states,
+ * stamped EXPLICIT + VALIDATED by the reducer. The rest change what is
+ * already there, and every one of them names an existing id, so the reducer
+ * can refuse anything it does not recognise:
+ *
+ *   updates   the answer corrects or sharpens a concept's label or note
+ *   confirms  the answer says an orange guess is right
+ *   rejects   the answer says an orange guess is wrong
+ *
+ * A green concept is never rejected here, only corrected through updates.
+ * Nothing in this schema can make a guess: there is no origin, no status and
+ * no questions array, as in Call 1.
+ */
+export const AnswerPatch = z.object({
+  /** True when the answer settles the question. False for "not sure", "later", or half an answer. */
+  answersQuestion: z.boolean(),
+  concepts: ExtractPatch.shape.concepts,
+  relationships: ExtractPatch.shape.relationships,
+  updates: z.array(
+    z.object({
+      id: z.string(),
+      /** New label, or "" to keep it. */
+      label: z.string(),
+      /** New note, or "" to keep it. */
+      note: z.string(),
+    })
+  ),
+  confirms: z.array(z.string()),
+  rejects: z.array(z.string()),
+});
+
+export type AnswerPatch = z.infer<typeof AnswerPatch>;
+
+export const ANSWER_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['answersQuestion', 'concepts', 'relationships', 'updates', 'confirms', 'rejects'],
+  properties: {
+    answersQuestion: {
+      type: 'boolean',
+      description:
+        'True when the answer settles the question. False when the person does not know, puts it off, or answers only part of it.',
+    },
+    concepts: EXTRACT_JSON_SCHEMA.properties.concepts,
+    relationships: EXTRACT_JSON_SCHEMA.properties.relationships,
+    updates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'label', 'note'],
+        properties: {
+          id: { type: 'string', description: 'Id of a concept already on the map that the answer corrects or makes more precise.' },
+          label: { type: 'string', description: 'The corrected label, 1-4 words, in the person\'s words. Empty string to keep the label.' },
+          note: { type: 'string', description: 'The corrected or added detail, as the person gave it. Empty string to keep the note.' },
+        },
+      },
+    },
+    confirms: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Ids of [PROPOSED] guesses that the answer says are right. Empty if none.',
+    },
+    rejects: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Ids of [PROPOSED] guesses that the answer says are wrong or do not apply. Never a [VALIDATED] id. Empty if none.',
+    },
+  },
+} as const;
+
 // ---------------------------------------------------------------- Call 3
 
 /*

@@ -99,7 +99,26 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       ],
     };
   } else if (tool === 'propose_patch') {
-    input2 = { concepts: [], relationships: [], questions: [{ text: 'Who approves a refund?', usefulness: 4 }] };
+    // One question box on the map, hanging off the first concept listed, so
+    // an answer on the map has something to answer.
+    const first = /^\s+(c_[a-z0-9]+)\s/m.exec(user)?.[1] ?? '';
+    input2 = {
+      concepts: first
+        ? [{ tempId: 'q1', label: 'Who signs the booking?', why: 'Nobody named', attachTo: first, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false }]
+        : [],
+      relationships: [],
+      questions: [{ text: 'Who approves a refund?', usefulness: 4 }],
+    };
+  } else if (tool === 'answer_patch') {
+    const about = /It is about "[^"]*" \((c_[a-z0-9]+)\)/.exec(user)?.[1] ?? '';
+    input2 = {
+      answersQuestion: !/not sure/i.test(user),
+      concepts: [{ tempId: 'a1', label: 'Booking manager', note: '', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' }],
+      relationships: about ? [{ from: about, to: 'a1', label: 'signed by' }] : [],
+      updates: [],
+      confirms: [],
+      rejects: [],
+    };
   }
 
   return new Response(
@@ -271,6 +290,21 @@ async function fullRun(label: string) {
   check('a raised question can be dismissed', dismissed.model.questions.find((q: any) => q.id === raised.id).status === 'DONE');
   const reread = await body(await runIdRoute.GET(new Request('http://local'), params(id)));
   check('the saved list survives reopening the run', reread.model.questions.filter((q: any) => q.savedAt && q.status === 'OPEN').length === 2);
+
+  const box = reread.model.concepts.find((c: any) => c.kind === 'QUESTION' && c.status !== 'REJECTED');
+  check('the finished map has a question box to answer', Boolean(box));
+  if (box) {
+    const unsure = await body(await actRoute.POST(json({ runId: id, action: { kind: 'answer', conceptId: box.id, text: 'Not sure, ask Stef.' } })));
+    check('an answer that does not settle it keeps the box', unsure.outcome?.answered === false && !unsure.model.concepts.find((c: any) => c.id === box.id).answeredAt);
+    const answered = await body(await actRoute.POST(json({ runId: id, action: { kind: 'answer', conceptId: box.id, text: 'The booking manager signs it.' } })));
+    const who = answered.model.concepts.find((c: any) => c.label === 'Booking manager');
+    check('an answer on a box is read and saved to the run', answered.status === 200 && answered.outcome?.answered === true);
+    check('what it says lands green, tied to the box\'s concept', who?.status === 'VALIDATED' && answered.model.relationships.some((r: any) => r.to === who?.id && r.label === 'signed by'));
+    check('the answered box carries its answer', answered.model.concepts.find((c: any) => c.id === box.id).answer === 'The booking manager signs it.');
+    check('the answer call is logged with its model and cost', answered.model.log.at(-1).kind === 'answer' && answered.model.log.at(-1).meta?.usage?.input === 10);
+    const twice = await body(await actRoute.POST(json({ runId: id, action: { kind: 'answer', conceptId: box.id, text: 'again' } })));
+    check('an answered box cannot be answered twice', twice.status === 400);
+  }
 
   const list = await body(await runRoute.GET());
   check('the run is listed', list.runs.some((r: any) => r.id === id && r.stage === 'READY'));

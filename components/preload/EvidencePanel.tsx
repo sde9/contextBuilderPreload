@@ -162,7 +162,11 @@ export default function EvidencePanel() {
           ))}
           {statements.map((s) => (
             <div key={s.id} className="quote">
-              <div className="quote-meta">said in the session</div>
+              <div className="quote-meta">
+                {s.questionId
+                  ? `answer to "${model.concepts.find((c) => c.id === s.questionId)?.label ?? 'a question'}"`
+                  : 'said in the session'}
+              </div>
               <blockquote>{s.text}</blockquote>
             </div>
           ))}

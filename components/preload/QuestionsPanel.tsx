@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { questionsMarkdown, usePreload } from '@/lib/preloadStore';
 import { norm } from '@/lib/guards';
+import { onMap as isOnMap } from '@/lib/types';
 
 /*
  * The questions to take into the interview.
@@ -34,8 +35,9 @@ export default function QuestionsPanel() {
   const savedTexts = new Set(saved.map((q) => norm(q.text)));
   const openQs = model.questions.filter((q) => q.status === 'OPEN' && !q.savedAt);
   const onMap = model.concepts.filter(
-    (c) => c.kind === 'QUESTION' && c.status !== 'REJECTED' && !c.absorbedInto && !savedTexts.has(norm(c.label))
+    (c) => c.kind === 'QUESTION' && isOnMap(c) && !savedTexts.has(norm(c.label))
   );
+  const answered = model.concepts.filter((c) => c.kind === 'QUESTION' && c.answeredAt && c.status !== 'REJECTED');
   const anchorOf = (conceptId: string) => {
     const r = model.relationships.find((x) => x.status !== 'REJECTED' && (x.from === conceptId || x.to === conceptId));
     return r ? (r.from === conceptId ? r.to : r.from) : '';
@@ -154,6 +156,20 @@ export default function QuestionsPanel() {
           );
         })}
       </ul>
+
+      {answered.length > 0 && (
+        <>
+          <h2 className="q-title q-title-gap">Answered on the map ({answered.length})</h2>
+          <ul className="q-list">
+            {answered.map((c) => (
+              <li key={c.id}>
+                <div className="q-text">{c.label}</div>
+                <div className="q-meta">{c.answer}</div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </aside>
   );
 }

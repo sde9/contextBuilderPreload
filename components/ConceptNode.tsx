@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { useSession } from '@/lib/store';
 import type { Kind, Origin, Status } from '@/lib/types';
@@ -25,7 +26,81 @@ export type ConceptNodeData = {
   onReject?: () => void;
   /** A QUESTION box already kept in the list of questions to ask. */
   saved?: boolean;
+  /** Preload passes its own answer and dismiss; the live canvas uses its store. */
+  onAnswer?: (text: string) => Promise<{ ok: boolean; answered: boolean }>;
+  onDismiss?: () => void;
+  /** True while an answer is being read, here or on another box. */
+  answerBusy?: boolean;
 };
+
+type AnswerOutcome = '' | 'open';
+
+/*
+ * A question gets an answer, not a yes or no. The box takes the answer, the
+ * answer is read against the map, and the map changes to match it: new
+ * boxes, a corrected label or note, an orange guess confirmed or thrown out.
+ * A question the answer settles leaves the map; one it does not stays, with
+ * a line saying so.
+ */
+function AnswerBox({
+  onAnswer,
+  onDismiss,
+  busy,
+}: {
+  onAnswer: (text: string) => Promise<{ ok: boolean; answered: boolean }>;
+  onDismiss: () => void;
+  busy: boolean;
+}) {
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [outcome, setOutcome] = useState<AnswerOutcome>('');
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || busy || sending) return;
+    setSending(true);
+    setOutcome('');
+    try {
+      const r = await onAnswer(text);
+      // On failure the text stays in the box, so nothing typed is lost.
+      if (r.ok) {
+        setDraft('');
+        if (!r.answered) setOutcome('open');
+      }
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="node-actions node-answer nodrag nopan nowheel" onClick={(e) => e.stopPropagation()}>
+      <textarea
+        className="node-answer-input"
+        rows={2}
+        value={draft}
+        disabled={busy || sending}
+        placeholder="Type the answer…"
+        aria-label="Answer to this question"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            void send();
+          }
+        }}
+      />
+      <div className="node-answer-row">
+        <button className="btn-yes" disabled={!draft.trim() || busy || sending} onClick={() => void send()} title="Answer (Cmd+Enter)">
+          {sending ? 'Reading…' : 'Answer'}
+        </button>
+        <button className="btn-no" disabled={sending} onClick={onDismiss} title="Not relevant. Don't ask it again">
+          Dismiss
+        </button>
+      </div>
+      {outcome === 'open' && <div className="node-answer-note">Noted. The answer did not settle it, so the question stays.</div>}
+    </div>
+  );
+}
 
 /** Plain words, because a tag is read by someone who has never seen the legend. */
 const KIND_TAG: Record<Kind, string> = {
@@ -70,8 +145,14 @@ export default function ConceptNode({ id, data }: NodeProps) {
   const sources = d.sources ?? 0;
   const confirmLive = useSession((s) => s.confirm);
   const rejectLive = useSession((s) => s.reject);
+  const answerLive = useSession((s) => s.answerQuestion);
+  const liveBusy = useSession((s) => s.phase !== 'idle');
   const confirm = d.onConfirm ?? (() => confirmLive(id));
   const reject = d.onReject ?? (() => rejectLive(id));
+  const question = d.kind === 'QUESTION' && !contested;
+  const answer = d.onAnswer ?? ((text: string) => answerLive(id, text));
+  const dismiss = d.onDismiss ?? reject;
+  const answerBusy = d.onAnswer ? Boolean(d.answerBusy) : liveBusy;
   const shape = SHAPE_PATH[d.kind];
 
   const statusClass = contested ? 'node-contested' : proposed ? 'node-proposed' : 'node-validated';
@@ -123,7 +204,9 @@ export default function ConceptNode({ id, data }: NodeProps) {
 
       {/* Always rendered, so a box keeps its size when the slider passes it;
           the stylesheet hides it on a step still to come. */}
-      {proposed && (
+      {question && <AnswerBox onAnswer={answer} onDismiss={dismiss} busy={answerBusy} />}
+
+      {proposed && !question && (
         <div className="node-actions">
           <button
             className="btn-yes"

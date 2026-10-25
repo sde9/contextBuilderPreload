@@ -1,5 +1,5 @@
 import type { Blocked, Concept, Model, Reading, Relationship, Source, Status } from './types';
-import { ROLE_RANK, addBlocks, newId, noBlocks } from './types';
+import { ROLE_RANK, addBlocks, newId, noBlocks, onMap } from './types';
 import { norm } from './guards';
 import type { MergePatch } from './schema';
 
@@ -28,7 +28,7 @@ const EXACT_AUTO = 'exact';
 // ------------------------------------------------------------------ helpers
 
 function visibleC(c: Concept): boolean {
-  return c.status !== 'REJECTED' && !c.absorbedInto;
+  return onMap(c);
 }
 
 /** Which documents a concept can cite. Empty for anything the AI proposed. */

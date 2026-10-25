@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { RUN_MISSING, loadRun, saveRun } from '@/lib/runStore';
 import {
   addQuestion,
+  answerPayload,
+  applyAnswer,
   confirmConcept,
   confirmRelationship,
   dismissQuestion,
@@ -10,12 +12,16 @@ import {
   rejectRelationship,
   saveQuestion,
   unsaveQuestion,
+  withCallMeta,
 } from '@/lib/reducer';
 import { resolveContest, splitConcept } from '@/lib/merge';
 import type { Model, SourceRole } from '@/lib/types';
+import { analyseAnswer } from '@/lib/answer';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// An answer is read by the model before it is applied.
+export const maxDuration = 60;
 
 /*
  * Everything a person does to a finished map, written back to the run.
@@ -37,7 +43,8 @@ type Action =
   | { kind: 'question-unsave'; questionId: string }
   | { kind: 'question-dismiss'; questionId: string }
   | { kind: 'question-add'; text: string; anchorId?: string }
-  | { kind: 'question-from-concept'; conceptId: string };
+  | { kind: 'question-from-concept'; conceptId: string }
+  | { kind: 'answer'; conceptId: string; text: string };
 
 export async function POST(req: Request) {
   try {
@@ -46,6 +53,7 @@ export async function POST(req: Request) {
     if (!model) return NextResponse.json({ error: RUN_MISSING }, { status: 404 });
 
     let next: Model = model;
+    let outcome: Record<string, unknown> | undefined;
 
     if (action.kind === 'confirm') next = confirmConcept(model, action.conceptId);
     if (action.kind === 'reject') next = rejectConcept(model, action.conceptId);
@@ -59,6 +67,23 @@ export async function POST(req: Request) {
     if (action.kind === 'question-dismiss') next = dismissQuestion(model, action.questionId);
     if (action.kind === 'question-add') next = addQuestion(model, String(action.text ?? '').slice(0, 500), action.anchorId ?? '');
     if (action.kind === 'question-from-concept') next = questionFromConcept(model, action.conceptId);
+    if (action.kind === 'answer') {
+      // The answer is read against the map as it is now, then applied with
+      // the same reducer the live session uses.
+      const text = String(action.text ?? '').slice(0, 4000);
+      const input = answerPayload(model, action.conceptId, text);
+      if (!input || !input.answer) return NextResponse.json({ error: 'That question is no longer on the map.' }, { status: 400 });
+      const read = await analyseAnswer(input);
+      const applied = applyAnswer(model, action.conceptId, text, read.patch);
+      next = withCallMeta(applied.model, 'answer', { model: read.model, ms: read.ms, usage: read.usage });
+      outcome = {
+        answered: applied.answered,
+        added: applied.added,
+        changed: applied.changed,
+        confirmed: applied.confirmed,
+        rejected: applied.rejected,
+      };
+    }
     if (action.kind === 'role') {
       // R9. The user owns this answer, and the merge uses it as the tiebreaker.
       next = {
@@ -68,7 +93,7 @@ export async function POST(req: Request) {
     }
 
     await saveRun(next);
-    return NextResponse.json({ model: next });
+    return NextResponse.json({ model: next, ...(outcome ? { outcome } : {}) });
   } catch (e) {
     console.error('[preload:act]', (e as Error).message);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

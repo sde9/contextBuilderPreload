@@ -1,4 +1,5 @@
 import type { Concept, Excerpt, Model, Relationship } from './types';
+import { onMap } from './types';
 import { activeOutline, liveId } from './outline';
 
 /*
@@ -33,7 +34,7 @@ export type StoryStep = {
 export type Story = { mode: StoryMode; steps: StoryStep[] };
 
 function visible(c: Concept): boolean {
-  return c.status !== 'REJECTED' && !c.absorbedInto;
+  return onMap(c);
 }
 
 const isGuess = (c: Concept) => c.status === 'PROPOSED';

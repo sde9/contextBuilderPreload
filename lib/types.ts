@@ -61,6 +61,8 @@ export type Statement = {
   text: string;
   at: string;
   turn: number;
+  /** The QUESTION box this statement answers. Absent for anything said in the composer. */
+  questionId?: string;
 };
 
 export type Concept = {
@@ -105,7 +107,24 @@ export type Concept = {
   skeleton?: 'MAIN' | 'PART';
   /** Reading order of a part, 0-based. */
   order?: number;
+
+  /**
+   * A QUESTION box the person answered. It leaves the map once the answer
+   * settles it; what the answer said lands on the map as its own concepts.
+   * Absent on every other concept and in files saved before answers existed.
+   */
+  answer?: string;
+  answeredAt?: string;
+  answerStatementId?: string;
 };
+
+/**
+ * On the map: not rejected, not folded into another concept by a merge, and
+ * not a question that has been answered. Every mode draws from this one test.
+ */
+export function onMap(c: Concept): boolean {
+  return c.status !== 'REJECTED' && !c.absorbedInto && !c.answeredAt;
+}
 
 /** One side of a disagreement between documents. */
 export type Reading = {
@@ -171,6 +190,8 @@ export type Question = {
   savedAt?: string;
   /** Preload. The concept the question is about, "" or absent when none. */
   anchorId?: string;
+  /** What the person said when they answered it on the map. */
+  answer?: string;
 };
 
 /**
@@ -230,7 +251,8 @@ export type LogEntry = {
     | 'edit'
     | 'goal'
     | 'outline'
-    | 'question';
+    | 'question'
+    | 'answer';
   payload: unknown;
   /** Guard activity, so prompt failures are measurable rather than invisible. */
   blocked?: Blocked;
