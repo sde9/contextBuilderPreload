@@ -87,6 +87,31 @@ when it is called without options.
 
 ---
 
+## Preload, 25 Oct 2026: the document's own structure
+
+Changes after the first real chapter went through. A map of a Word chapter came
+out as a flat list of boxes in one grey area: correct, and no help in
+understanding the chapter.
+
+| What changed for the user | Where |
+|---|---|
+| A Word file keeps its headings (by style, by numbering like "5.5", or "Chapter 5"), lists and tables. Tables of contents and deleted revisions are left out. A PDF keeps paragraphs, finds headings by font size, mends words broken at a line end and drops running headers and page numbers | `lib/parse.ts` |
+| Each document is read top down first. One outline call finds the main point and the parts in reading order, each with a quote. A quote found in the text makes the box green; a quote that is not there makes it orange | `lib/outline.ts`, `OUTLINE_SYSTEM`, stage 1 |
+| With one document read, the map is its outline: the main point on top, one row per part, the part's details to its right. Overview shows the main point and the parts; double-click a part to open it | `structureFromOutline`, `layoutByParts` |
+| A detail's link to its part runs down to a rail under its row and along it, so no line passes behind another box. The label sits just under the detail it belongs to | `routeOutlineLink` |
+| The slider under the map replays it step by step. **Logic**: the main point, each part with its details, then the AI's guesses. **As written**: in the order the documents say it. Steps still to come are pale outlines, so the shape of the whole map is there from the first step | `lib/story.ts`, `StoryBar` |
+| A section the model could not read is tried again in two halves. If it still fails, the source names the sections that were not read. Before, they disappeared without a word | `readSource`, `SourceRail` |
+| Two concepts from one document can now merge. Two parts of one document never do | `shortlistPairs` |
+| A new kind, `CLAIM`: a statement the document argues for, with its verdict first | `types.ts`, `ExtractPatchPL` |
+| One silhouette per kind (thing box, detail chip, who pill, step arrow, rule plate, claim with a bar, question bubble, problem with a red top), size for importance, plain words on the tags, and the same legend on both pages | `ConceptNode.tsx`, `ShapeLegend.tsx` |
+| The open questions pill opens the questions to ask. Save a question the map raised, dismiss it, or write your own. The saved list stays with the run and leaves as Markdown or on the clipboard | `QuestionsPanel`, `api/preload/act` |
+
+With several documents the map is still built by areas, as before; the outline
+of each one is still read, because it tells the extract call what each section
+is part of. `PROMPT_VERSION` is `p5-2026-10-25`.
+
+---
+
 ## What preload does
 
 ```
@@ -97,16 +122,19 @@ drop files
   │                         split: "p.18", "§ Pricing", "00:14:22".
   │                         No model call. Nothing is spent yet.
   │
-  ├─ stage 1  READING       one map per document, using the EXISTING extract
-  │                         call. Same schema, so nothing can be marked as
-  │                         inferred: there is no field for it.
+  ├─ stage 1  READING       one outline call per document: the main point and
+  │                         the parts, each with a quote that is checked
+  │                         against the text. Then one map per document,
+  │                         using the EXISTING extract call section by
+  │                         section. A failed section is tried in two halves.
   │
   ├─ stage 2  MERGING       the new work. Exact matches merge with no model.
   │                         Three cheap filters shortlist the rest. Only the
   │                         shortlist is adjudicated.
   │
-  ├─ stage 3  STRUCTURING   five to nine areas, graded by how many links they
-  │                         cut. Three levels of detail.
+  ├─ stage 3  STRUCTURING   one document: its outline. Several: five to nine
+  │                         areas, graded by how many links they cut. Three
+  │                         levels of detail either way.
   │
   └─ stage 4  PROBING       what the whole corpus never says.
 ```
@@ -152,6 +180,8 @@ lib/
   chunk.ts        splitting on document seams, locators, role guessing   PURE
   merge.ts        shortlist, applyMerge, split, resolveContest           PURE
   cluster.ts      areas, tiers, crossing check, coverage                 PURE
+  outline.ts      the outline: quotes checked, parts, levels             PURE
+  story.ts        the steps behind the slider                            PURE
   parse.ts        pdf/docx/rtf/text to text                       server only
   pipeline.ts     the five stages                                 server only
   runStore.ts     a run in Blob or on disk, one key per piece      server only
@@ -166,10 +196,13 @@ app/
   api/preload/step             one unit of work
   api/preload/health           is there a store? ?probe=1 writes and reads one
   api/preload/act    confirm, reject, split, resolve, role
+components/
+  ShapeLegend.tsx     what the shapes mean, on both pages
 components/preload/
   Intake  RunProgress  SourceRail  EvidencePanel  PreloadCanvas  ClusterNode
+  StoryBar  QuestionsPanel
 scripts/
-  smoke-preload.ts    101 assertions, offline
+  smoke-preload.ts    193 assertions, offline
   smoke-store.ts      every preload route, a fake model, memory and disk stores
   run-preload.mjs     drive a whole run from the command line
 sample-documents/     four files with one deliberate contradiction
@@ -189,7 +222,8 @@ was written and proven before a single provider call existed.
 | `schema.ts` | `ExtractPatch` untouched. `MergePatch` and `ClusterPatch` added. |
 | `prompts.ts` | `EXTRACT_SYSTEM` untouched. Preload changes the user message, never the system prompt. |
 | `place.ts` | untouched, and unused by preload |
-| `ConceptNode.tsx` | contested treatment, source count badge |
+| `ConceptNode.tsx` | contested treatment, source count badge. Since 25 Oct: one silhouette per kind, plain-word tags, the main point and parts drawn larger, handles on all four sides, and Confirm and Reject passed in by the page that draws it |
+| `ConceptEdge.tsx` | since 25 Oct: a label can sit near one end, a link can follow a route worked out from the layout, and a link still to come on the slider is faint |
 | `export.ts` | contested survives into draw.io and Mermaid |
 
 The original 20 smoke assertions pass unchanged.
@@ -210,6 +244,7 @@ this machine only:
 | `PROPOSE_MODEL` | stronger |
 | `MERGE_MODEL` | defaults to `PROPOSE_MODEL`. The merge is where quality shows |
 | `CLUSTER_MODEL` | defaults to `PROPOSE_MODEL` |
+| `OUTLINE_MODEL` | the outline call, once per document. Defaults to `PROPOSE_MODEL` |
 | `PROPOSAL_CAP` | orange nodes per pass, default 8 in preload |
 | `BLOB_READ_WRITE_TOKEN` | set by Vercel when a Blob store is connected to the project. Runs go there |
 | `PRELOAD_RUN_DIR` | keep runs in this folder instead. Default `.runs` when running locally |
