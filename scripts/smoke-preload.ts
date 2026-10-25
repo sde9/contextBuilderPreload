@@ -26,7 +26,7 @@ import {
 } from '../lib/merge';
 import { applyClusters, assignTiers, clusterEdges, conceptsAtLevel, coverage, crossingRatio } from '../lib/cluster';
 import { chunkText, chooseStrategy, guessRole, PAGE_BREAK } from '../lib/chunk';
-import { looksLikeRtf, rtfToText } from '../lib/parse';
+import { docxXmlToText, dropRunningLines, looksLikeHeading, looksLikeRtf, pdfItemsToText, rtfToText } from '../lib/parse';
 import { emptyModel, newId, type Model, type Source } from '../lib/types';
 import type { ExtractPatch, MergePatch, ClusterPatch } from '../lib/schema';
 
@@ -143,6 +143,79 @@ check('uc0 means no fallback to skip', textEdit.text.endsWith(String.fromCharCod
 check('a Symbol-font bullet becomes a real bullet', rtf("{|rtf1|ansi{|listtext |u61623|'b7|tab}Debug code|par }").text.startsWith(String.fromCharCode(0x2022) + String.fromCharCode(9) + 'Debug code'));
 check('an RTF file is recognised by its first bytes', looksLikeRtf(Buffer.from('{' + String.fromCharCode(92) + 'rtf1 x}')) && !looksLikeRtf(Buffer.from('# Scope')));
 check('an RTF with no words is EMPTY, not OK', rtf('{|rtf1|ansi{|fonttbl{|f0 Arial;}}|par }').status === 'EMPTY');
+
+section('Word and PDF keep their structure');
+
+const styles = `<w:styles>
+<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Berschrift2"><w:name w:val="heading 2"/></w:style>
+<w:style w:type="paragraph" w:styleId="MyHead"><w:name w:val="My head"/><w:basedOn w:val="Heading1"/></w:style>
+<w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/></w:style>
+<w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/></w:style>
+</w:styles>`;
+const para = (text: string, style = '', extra = '') =>
+  `<w:p>${style || extra ? `<w:pPr>${style ? `<w:pStyle w:val="${style}"/>` : ''}${extra}</w:pPr>` : ''}<w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+const docXml = `<w:document><w:body>
+${para('Chapter 5 Discussion', 'Title')}
+${para('5.1 Benefit\tand ease', 'TOC1')}
+${para('Intro sentence one. Intro sentence two.')}
+${para('5.1 Benefit and ease', 'Heading1')}
+${para('First body paragraph.')}
+<w:p><w:r><w:t>Kept </w:t></w:r><w:del><w:r><w:delText>deleted words </w:delText></w:r></w:del><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>HYPERLINK "https://x.y"</w:instrText></w:r><w:r><w:t>and linked.</w:t></w:r></w:p>
+${para('Bullet one', 'ListBullet')}
+${para('Bullet two', '', '<w:numPr><w:ilvl w:val="0"/></w:numPr>')}
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Expectation</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Verdict</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>Benefit</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Partly supported</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+${para('Deutsch', 'Berschrift2')}
+${para('Inherited heading', 'MyHead')}
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>5.3 Typed by hand</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>2 Literature review</w:t></w:r></w:p>
+${para('1. A numbered sentence that is not bold')}
+<w:p><w:r><w:t>Box text</w:t></w:r><mc:AlternateContent><mc:Choice><w:txbxContent>${para('Inside the box')}</w:txbxContent></mc:Choice><mc:Fallback><w:txbxContent>${para('Inside the box')}</w:txbxContent></mc:Fallback></mc:AlternateContent></w:p>
+${para('Ampersand &amp; quote &quot;x&quot;')}
+</w:body></w:document>`;
+const docText = docxXmlToText(docXml, styles);
+const docBlocks = docText.split(nl + nl);
+check('a Title and a heading style become # lines', docText.includes('# Chapter 5 Discussion') && docText.includes('# 5.1 Benefit and ease'), docText.slice(0, 120));
+check('every paragraph is its own block', docBlocks.includes('Intro sentence one. Intro sentence two.') && docBlocks.includes('First body paragraph.'));
+check('a table of contents line is dropped', !docText.includes('Benefit' + String.fromCharCode(9) + 'and ease'));
+check('deleted revisions and field codes are not text', docText.includes('Kept and linked.') && !docText.includes('deleted words') && !docText.includes('HYPERLINK'));
+check('list items stay together as one block', docBlocks.includes('- Bullet one' + nl + '- Bullet two'));
+check('a table becomes one row per line', docText.includes('Expectation | Verdict' + nl + 'Benefit | Partly supported'));
+check('a localised heading style is found by its name', docText.includes('## Deutsch'));
+check('a style based on a heading is a heading', docText.includes('# Inherited heading'));
+check('a numbered line typed by hand is a heading', docText.includes('## 5.3 Typed by hand'));
+check('a bold "2 Literature review" is a heading', docText.includes('# 2 Literature review'));
+check('a numbered sentence that is not bold stays text', docBlocks.includes('1. A numbered sentence that is not bold'));
+check('a text box appears once', docText.split('Inside the box').length === 2);
+check('entities decode', docText.includes('Ampersand & quote "x"'));
+check('looksLikeHeading refuses a sentence', looksLikeHeading('5.5 This one ends with a full stop.', true) === 0 && looksLikeHeading('5.5 The TOE framework', false) === 2);
+
+const words = (s: string, x: number, y: number, size = 11) => ({ str: s, transform: [size, 0, 0, size, x, y], width: s.length * size * 0.5, height: size });
+const pdfText = pdfItemsToText([
+  words('Chapter 5 Discussion', 90, 700, 20),
+  words('This chapter reads the findings against the', 90, 660),
+  words('four expectations.', 90, 647),
+  words('5.1 Benefit and ease', 90, 610, 14),
+  words('Benefit was the reason to start. Ease is a busi-', 90, 590),
+  words('ness threshold.', 90, 577),
+  words('• First point', 90, 564),
+  words('Second', 90, 530),
+  words('half', 90 + 'Second'.length * 5.5 + 3, 530),
+]);
+const pdfBlocks = pdfText.split(nl + nl);
+check('a big line on a PDF page is a heading', pdfBlocks[0] === '# Chapter 5 Discussion' && pdfBlocks.includes('## 5.1 Benefit and ease'), JSON.stringify(pdfBlocks));
+check('wrapped PDF lines rejoin into one paragraph', pdfBlocks.includes('This chapter reads the findings against the four expectations.'), JSON.stringify(pdfBlocks));
+check('a word broken at the line end is mended', pdfText.includes('business threshold.'));
+check('a bullet starts its own line inside the paragraph', pdfText.includes(nl + '• First point'));
+check('a gap between runs on one line is a space', pdfText.includes('Second half'));
+const pages = ['ACME report' + nl + 'Body one' + nl + 'Page 1', 'ACME report' + nl + 'Body two' + nl + 'Page 2', 'ACME report' + nl + 'Body three' + nl + 'Page 3'];
+const cleanedPages = dropRunningLines(pages);
+check('running headers and page numbers are dropped', cleanedPages.join('|') === 'Body one|Body two|Body three', cleanedPages.join('|'));
+
+const sectioned = chunkText('src_w', docText, { name: 'Chapter 5.docx', role: 'REFERENCE' });
+check('a Word file with headings is split by section', chooseStrategy('Chapter 5.docx', 'REFERENCE', docText) === 'heading' && sectioned.some((c) => c.locator === '§ 5.1 Benefit and ease'), sectioned.map((c) => c.locator).join(' | '));
+check('a heading with no body is carried into the next section', !sectioned.some((c) => c.text.trim() === '# Chapter 5 Discussion'));
 
 section('stage 1: one map per document');
 

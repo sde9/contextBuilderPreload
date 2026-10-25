@@ -79,7 +79,11 @@ function byHeading(text: string): Piece[] {
   for (const line of lines) {
     const m = line.match(HEADING);
     if (m) {
-      flush();
+      // A heading straight after another heading ("Chapter 5" then "5.1")
+      // has no body of its own. Carry it into the next section rather than
+      // sending a chunk that is nothing but a title.
+      const onlyHeadings = buf.every((l) => !l.trim() || HEADING.test(l));
+      if (!onlyHeadings) flush();
       title = m[2].slice(0, 60);
       buf.push(line);
       continue;
@@ -174,6 +178,9 @@ export function chooseStrategy(name: string, role: SourceRole, text: string): Ch
   if (/\.(csv|tsv)$/i.test(name)) return 'rows';
   if (role === 'TRANSCRIPT' || TIMESTAMP.test(text.split('\n').find((l) => l.trim()) ?? '')) return 'timestamp';
   if (/\.(md|markdown)$/i.test(name) || HEADING.test(text.split('\n')[0] ?? '')) return 'heading';
+  // Word and PDF files now arrive with their headings marked. Two or more is
+  // a document with sections, wherever the first one sits.
+  if (text.split('\n').filter((l) => HEADING.test(l)).length >= 2) return 'heading';
   return 'paragraph';
 }
 

@@ -80,29 +80,225 @@ function readZipEntry(buf: Buffer, wanted: string): Buffer | null {
   return null;
 }
 
-function docxToText(buf: Buffer): ParseResult {
-  const xmlBuf = readZipEntry(buf, 'word/document.xml');
-  if (!xmlBuf) return { text: '', status: 'FAILED', note: 'Not a readable .docx (no word/document.xml).' };
+/*
+ * Word keeps the author's structure, and the map needs it: headings are the
+ * seams the chunker splits on and the skeleton the outline call starts from.
+ * The first version flattened every paragraph to one newline, so a chapter
+ * with no empty paragraphs came out as one block of 10,000+ characters, one
+ * chunk, and one failed call that nobody saw (25 Oct 2026).
+ *
+ * So the reader walks the paragraphs. A heading style (or an outline level,
+ * or a short bold numbered line typed by hand) becomes a "#" line, every
+ * paragraph ends with a blank line, list items stay together, and a table
+ * becomes one row per line. Only real text counts: deleted revisions and
+ * field codes are skipped, and the fallback copy of a text box is dropped so
+ * its words appear once.
+ */
 
-  const xml = xmlBuf.toString('utf8');
-  const text = xml
-    // A tab and a line break are content, not markup.
-    .replace(/<w:tab\b[^>]*\/>/g, '\t')
-    .replace(/<w:br\b[^>]*\/>/g, '\n')
-    // Paragraph and table row ends are the only structure worth keeping.
-    .replace(/<\/w:p>/g, '\n')
-    .replace(/<\/w:tr>/g, '\n')
-    .replace(/<\/w:tc>/g, '\t')
-    .replace(/<[^>]+>/g, '')
+type StyleInfo = { name: string; basedOn: string; outline: number | null };
+
+function xmlAttr(attrs: string, name: string): string {
+  const m = new RegExp(`${name}="([^"]*)"`).exec(attrs);
+  return m ? m[1] : '';
+}
+
+function decodeXml(s: string): string {
+  return s
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n');
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&amp;/g, '&');
+}
 
-  return ok(text);
+function readStyles(xml: string | null): Map<string, StyleInfo> {
+  const styles = new Map<string, StyleInfo>();
+  if (!xml) return styles;
+  const re = /<w:style\b([^>]*)>([\s\S]*?)<\/w:style>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const id = xmlAttr(m[1], 'w:styleId');
+    if (!id) continue;
+    const body = m[2];
+    const name = /<w:name\s+w:val="([^"]*)"/.exec(body)?.[1] ?? '';
+    const basedOn = /<w:basedOn\s+w:val="([^"]*)"/.exec(body)?.[1] ?? '';
+    const outline = /<w:outlineLvl\s+w:val="(\d+)"/.exec(body)?.[1];
+    styles.set(id, { name, basedOn, outline: outline === undefined ? null : Number(outline) });
+  }
+  return styles;
+}
+
+/** 1-6 for a heading style, 0 for anything else. Follows basedOn a few steps. */
+function styleHeadingLevel(styles: Map<string, StyleInfo>, id: string): number {
+  let cur = id;
+  for (let depth = 0; cur && depth < 6; depth++) {
+    const s = styles.get(cur);
+    const name = (s?.name || cur).toLowerCase();
+    const named = /^heading\s*([1-9])$/.exec(name);
+    if (named) return Math.min(6, Number(named[1]));
+    if (name === 'title') return 1;
+    if (s?.outline !== null && s?.outline !== undefined && s.outline < 9) return Math.min(6, s.outline + 1);
+    if (!s) return 0;
+    cur = s.basedOn;
+  }
+  return 0;
+}
+
+function styleIsList(styles: Map<string, StyleInfo>, id: string): boolean {
+  const name = (styles.get(id)?.name || id).toLowerCase();
+  return /^list/.test(name);
+}
+
+/**
+ * A short line numbered "5.5 ..." or a bold "1 Introduction" reads as a
+ * heading even when the author typed it by hand rather than using a style.
+ * A full sentence never does.
+ */
+export function looksLikeHeading(text: string, mostlyBold: boolean): number {
+  const t = text.trim();
+  if (!t || t.length > 120 || /[.:;,!?]$/.test(t)) return 0;
+  const deep = /^(\d+(?:\.\d+)+)\.?\s+\S/.exec(t);
+  if (deep) return Math.min(6, deep[1].split('.').length);
+  if (mostlyBold && /^(\d+\.?|[IVX]+\.|chapter\s+\d+|глава\s+\d+)\s+\S/i.test(t)) return 1;
+  return 0;
+}
+
+type Para = { text: string; style: string; outline: number | null; list: boolean; bold: number; plain: number; runBold: boolean };
+
+export function docxXmlToText(documentXml: string, stylesXml: string | null): string {
+  const styles = readStyles(stylesXml);
+  // Word writes a text box twice, once for new readers and once as a fallback.
+  const xml = documentXml.replace(/<mc:Fallback>[\s\S]*?<\/mc:Fallback>/g, '');
+
+  const blocks: string[] = [];
+  const stack: Para[] = [];
+  let cur: Para | null = null;
+  let tableDepth = 0;
+  let rows: string[] = [];
+  let row: string[] = [];
+  let cell: string[] = [];
+
+  const push = (block: string, list: boolean) => {
+    const last = blocks[blocks.length - 1];
+    if (list && last !== undefined && last.startsWith('- ')) blocks[blocks.length - 1] = `${last}\n${block}`;
+    else blocks.push(block);
+  };
+
+  const finish = (p: Para) => {
+    const text = p.text.replace(/[ \t]+\n/g, '\n').trim();
+    if (!text) return;
+    // A table of contents repeats the headings with page numbers. The real
+    // headings follow, so the copy is noise.
+    if (/^toc\b/i.test(styles.get(p.style)?.name ?? p.style)) return;
+    if (tableDepth > 0) {
+      cell.push(text.replace(/\s+/g, ' '));
+      return;
+    }
+    const level =
+      styleHeadingLevel(styles, p.style) ||
+      (p.outline !== null && p.outline < 9 ? Math.min(6, p.outline + 1) : 0) ||
+      looksLikeHeading(text, p.plain > 0 && p.bold >= p.plain * 0.8);
+    if (level) {
+      blocks.push(`${'#'.repeat(level)} ${text.replace(/\s+/g, ' ')}`);
+      return;
+    }
+    if (p.list || styleIsList(styles, p.style)) {
+      push(`- ${text.replace(/\n+/g, ' ')}`, true);
+      return;
+    }
+    blocks.push(text);
+  };
+
+  const re = /<(\/?)w:(p|pStyle|outlineLvl|numPr|t|tab|br|cr|tbl|tr|tc|r|b|noBreakHyphen)\b([^>]*?)(\/?)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const closing = m[1] === '/';
+    const tag = m[2];
+    const attrs = m[3];
+    const selfClosing = m[4] === '/';
+
+    switch (tag) {
+      case 'p':
+        if (closing) {
+          if (cur) finish(cur);
+          cur = stack.pop() ?? null;
+        } else if (!selfClosing) {
+          if (cur) stack.push(cur);
+          cur = { text: '', style: '', outline: null, list: false, bold: 0, plain: 0, runBold: false };
+        }
+        break;
+      case 'pStyle':
+        if (cur) cur.style = xmlAttr(attrs, 'w:val');
+        break;
+      case 'outlineLvl':
+        if (cur) cur.outline = Number(xmlAttr(attrs, 'w:val'));
+        break;
+      case 'numPr':
+        if (cur && !closing) cur.list = true;
+        break;
+      case 'r':
+        if (cur && !closing) cur.runBold = false;
+        break;
+      case 'b': {
+        const v = xmlAttr(attrs, 'w:val');
+        if (cur && !closing) cur.runBold = !v || v === '1' || v === 'true' || v === 'on';
+        break;
+      }
+      case 't': {
+        if (closing || selfClosing) break;
+        const end = xml.indexOf('</w:t>', re.lastIndex);
+        if (end < 0) break;
+        const text = decodeXml(xml.slice(re.lastIndex, end));
+        re.lastIndex = end + 6;
+        if (!cur) break;
+        cur.text += text;
+        if (cur.runBold) cur.bold += text.trim().length;
+        cur.plain += text.trim().length;
+        break;
+      }
+      case 'tab':
+        if (cur && !closing) cur.text += '\t';
+        break;
+      case 'br':
+      case 'cr':
+        if (cur && !closing) cur.text += '\n';
+        break;
+      case 'noBreakHyphen':
+        if (cur && !closing) cur.text += '-';
+        break;
+      case 'tbl':
+        if (selfClosing) break;
+        if (!closing) {
+          tableDepth++;
+          if (tableDepth === 1) rows = [];
+        } else {
+          if (tableDepth === 1 && rows.length) blocks.push(rows.join('\n'));
+          tableDepth = Math.max(0, tableDepth - 1);
+        }
+        break;
+      case 'tr':
+        if (tableDepth !== 1 || selfClosing) break;
+        if (!closing) row = [];
+        else if (row.some((c) => c)) rows.push(row.join(' | '));
+        break;
+      case 'tc':
+        if (tableDepth !== 1 || selfClosing) break;
+        if (!closing) cell = [];
+        else row.push(cell.join(' '));
+        break;
+    }
+  }
+
+  return blocks.join('\n\n');
+}
+
+function docxToText(buf: Buffer): ParseResult {
+  const xmlBuf = readZipEntry(buf, 'word/document.xml');
+  if (!xmlBuf) return { text: '', status: 'FAILED', note: 'Not a readable .docx (no word/document.xml).' };
+  const stylesBuf = readZipEntry(buf, 'word/styles.xml');
+  return ok(docxXmlToText(xmlBuf.toString('utf8'), stylesBuf ? stylesBuf.toString('utf8') : null));
 }
 
 // ---------------------------------------------------------------- rtf
@@ -346,6 +542,129 @@ export function rtfToText(src: string): ParseResult {
 
 // ---------------------------------------------------------------- pdf
 
+/*
+ * pdf.js hands back positioned text runs, not lines. The first version joined
+ * every run on a page with a space, so a page became one long line: no
+ * paragraphs, no headings, nothing for the chunker or the outline to hold.
+ *
+ * Runs on the same baseline are one line. A larger vertical gap starts a new
+ * paragraph. A line set noticeably bigger than the body text, short and
+ * without a full stop, is a heading and gets a "#". Wrapped lines rejoin with
+ * a space, and a word broken by a hyphen at the end of a line is mended.
+ */
+
+export type PdfItem = { str: string; transform?: number[]; width?: number; height?: number };
+
+const PRIVATE_USE = new RegExp('[' + String.fromCharCode(0xf000) + '-' + String.fromCharCode(0xf0ff) + ']', 'g');
+const BULLET_START = /^([•▪◦‣\-–—*]|\(?\d{1,2}[.)])\s/;
+
+type PdfLine = { text: string; size: number; y: number };
+
+export function pdfItemsToText(items: PdfItem[]): string {
+  const lines: PdfLine[] = [];
+  let cur: (PdfLine & { endX: number; weight: number; sizeSum: number }) | null = null;
+
+  for (const it of items) {
+    const raw = (it.str ?? '').replace(PRIVATE_USE, '•');
+    const t = it.transform;
+    if (!t || t.length < 6) {
+      if (!raw.trim()) continue;
+      if (!cur) cur = { text: '', size: 10, y: 0, endX: 0, weight: 0, sizeSum: 0 };
+      cur.text += (cur.text && !/\s$/.test(cur.text) ? ' ' : '') + raw;
+      continue;
+    }
+    const size = Math.max(1, Math.hypot(t[2], t[3]) || it.height || 10);
+    const x = t[4];
+    const y = t[5];
+    const sameLine = cur !== null && Math.abs(y - cur.y) <= Math.max(1.5, Math.min(size, cur.size) * 0.45);
+    if (!sameLine) {
+      if (cur && cur.text.trim()) lines.push({ text: cur.text.trim(), size: cur.size, y: cur.y });
+      cur = { text: '', size, y, endX: x, weight: 0, sizeSum: 0 };
+    }
+    const line = cur!;
+    if (raw) {
+      const gap = x - line.endX;
+      if (line.text && !/\s$/.test(line.text) && !/^\s/.test(raw) && gap > size * 0.15) line.text += ' ';
+      line.text += raw;
+      const len = raw.trim().length;
+      if (len) {
+        line.sizeSum += size * len;
+        line.weight += len;
+        line.size = line.sizeSum / line.weight;
+      }
+    }
+    line.endX = x + (it.width ?? raw.length * size * 0.5);
+  }
+  if (cur && cur.text.trim()) lines.push({ text: cur.text.trim(), size: cur.size, y: cur.y });
+  if (!lines.length) return '';
+
+  // Body size: the size most of the characters on the page are set in.
+  const bySize = new Map<number, number>();
+  for (const l of lines) bySize.set(Math.round(l.size), (bySize.get(Math.round(l.size)) ?? 0) + l.text.length);
+  const body = [...bySize.entries()].sort((a, b) => b[1] - a[1])[0][0];
+
+  const blocks: string[] = [];
+  let para = '';
+  let prev: PdfLine | null = null;
+  const flush = () => {
+    if (para.trim()) blocks.push(para.trim());
+    para = '';
+  };
+
+  for (const l of lines) {
+    const heading =
+      l.size >= body * 1.18 && l.text.length <= 120 && !/[.:;,!?]$/.test(l.text) && /[^\d\W]/.test(l.text);
+    if (heading) {
+      flush();
+      blocks.push(`${l.size >= body * 1.45 ? '#' : '##'} ${l.text.replace(/\s+/g, ' ')}`);
+      prev = l;
+      continue;
+    }
+    const gap = prev ? prev.y - l.y : 0;
+    const newParagraph = !prev || gap < 0 || gap > Math.max(l.size, prev.size) * 1.6 || blocks.length === 0 && !para;
+    if (newParagraph) {
+      flush();
+      para = l.text;
+    } else if (BULLET_START.test(l.text)) {
+      para += `\n${l.text}`;
+    } else if (/[A-Za-zА-Яа-яЁё]-$/.test(para) && /^[a-zа-яё]/.test(l.text)) {
+      para = para.slice(0, -1) + l.text;
+    } else {
+      para += ` ${l.text}`;
+    }
+    prev = l;
+  }
+  flush();
+  return blocks.join('\n\n');
+}
+
+/**
+ * Running headers, footers and page numbers repeat on most pages and say
+ * nothing. A first or last line that recurs, digits aside, on at least half
+ * of three or more pages is dropped.
+ */
+export function dropRunningLines(pages: string[]): string[] {
+  if (pages.length < 3) return pages;
+  const key = (line: string) => line.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().toLowerCase();
+  const counts = new Map<string, number>();
+  for (const page of pages) {
+    const lines = page.split('\n').filter((l) => l.trim());
+    const edge = new Set([lines[0], lines[lines.length - 1]].filter(Boolean).map((l) => key(l!)));
+    for (const k of edge) counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const running = new Set([...counts].filter(([k, n]) => k && n >= Math.max(3, pages.length / 2)).map(([k]) => k));
+  if (!running.size) return pages;
+  return pages.map((page) => {
+    const lines = page.split('\n');
+    const first = lines.findIndex((l) => l.trim());
+    if (first >= 0 && running.has(key(lines[first]))) lines.splice(first, 1);
+    let last = lines.length - 1;
+    while (last >= 0 && !lines[last].trim()) last--;
+    if (last >= 0 && running.has(key(lines[last]))) lines.splice(last, 1);
+    return lines.join('\n').trim();
+  });
+}
+
 async function pdfToText(buf: Buffer): Promise<ParseResult> {
   try {
     // Imported lazily, and from the library file rather than the package
@@ -358,11 +677,15 @@ async function pdfToText(buf: Buffer): Promise<ParseResult> {
       // One form feed per page, so a citation can say "p.18" and mean it.
       pagerender: async (page) => {
         const content = await page.getTextContent();
-        return content.items.map((i) => i.str).join(' ') + PAGE_BREAK;
+        return pdfItemsToText(content.items) + PAGE_BREAK;
       },
     });
 
-    const result = ok(out.text);
+    const pages = out.text.split(PAGE_BREAK);
+    const tail = pages.length > 1 && !pages[pages.length - 1].trim() ? pages.pop() : undefined;
+    const cleaned = dropRunningLines(pages).join(PAGE_BREAK) + (tail !== undefined ? PAGE_BREAK : '');
+
+    const result = ok(cleaned);
     if (result.status === 'EMPTY') {
       return {
         text: '',
