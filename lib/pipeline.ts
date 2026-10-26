@@ -49,6 +49,12 @@ const QUOTE_CHARS = 4000;
 const MAX_CHUNKS_PER_SOURCE = 40;
 const CHUNK_CONCURRENCY = 4;
 const MERGE_PAIR_LIMIT = 120;
+/**
+ * Pairs per merge call. One decision is about 60 output tokens, so 120 pairs
+ * in one call overran the 4000-token answer and MERGING failed on every
+ * document big enough to fill the shortlist (110 concepts, 27 Oct 2026).
+ */
+const MERGE_BATCH = 30;
 const CLUSTER_ATTEMPTS = 2;
 const GOOD_CROSSING = 0.35;
 
@@ -299,35 +305,50 @@ async function mergeAll(model: Model): Promise<{ model: Model; note: string; blo
       .map((sid) => nameOf.get(sid) ?? sid)
       .join(' + ') || 'the AI';
 
-  const { value } = await structured(
-    {
-      model: mergeModel(),
-      system: MERGE_SYSTEM,
-      user: mergeUser({
-        title: working.title,
-        sources: model.sources.map((s) => ({ id: s.id, name: s.name, role: ROLE_LABEL[s.role] })),
-        pairs: pairs.map((p) => {
-          const a = byId.get(p.aId)!;
-          const b = byId.get(p.bId)!;
-          return {
-            aId: a.id,
-            aLabel: a.label,
-            aNote: a.note,
-            aSource: describe(a),
-            bId: b.id,
-            bLabel: b.label,
-            bNote: b.note,
-            bSource: describe(b),
-            why: p.why === 'NEAR_LABEL' ? 'similar names' : 'they connect to the same thing',
-          };
-        }),
-      }),
-      schemaName: 'merge_patch',
-      jsonSchema: MERGE_JSON_SCHEMA,
-      maxTokens: 4000,
-    },
-    MergePatch
+  const sourcesForPrompt = model.sources.map((s) => ({ id: s.id, name: s.name, role: ROLE_LABEL[s.role] }));
+  const batches: (typeof pairs)[] = [];
+  for (let i = 0; i < pairs.length; i += MERGE_BATCH) batches.push(pairs.slice(i, i + MERGE_BATCH));
+
+  const results = await Promise.allSettled(
+    batches.map((batch) =>
+      structured(
+        {
+          model: mergeModel(),
+          system: MERGE_SYSTEM,
+          user: mergeUser({
+            title: working.title,
+            sources: sourcesForPrompt,
+            pairs: batch.map((p) => {
+              const a = byId.get(p.aId)!;
+              const b = byId.get(p.bId)!;
+              return {
+                aId: a.id,
+                aLabel: a.label,
+                aNote: a.note,
+                aSource: describe(a),
+                bId: b.id,
+                bLabel: b.label,
+                bNote: b.note,
+                bSource: describe(b),
+                why: p.why === 'NEAR_LABEL' ? 'similar names' : 'they connect to the same thing',
+              };
+            }),
+          }),
+          schemaName: 'merge_patch',
+          jsonSchema: MERGE_JSON_SCHEMA,
+          maxTokens: 6000,
+        },
+        MergePatch
+      )
+    )
   );
+
+  // A failed batch costs only its own pairs: they stay as separate boxes, which
+  // is the safe default. Only when every batch fails does the stage fail.
+  const ok = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof structured<MergePatch>>>> => r.status === 'fulfilled');
+  if (!ok.length) throw (results[0] as PromiseRejectedResult).reason;
+  const skippedPairs = results.reduce((n, r, i) => (r.status === 'rejected' ? n + batches[i].length : n), 0);
+  const value: MergePatch = { decisions: ok.flatMap((r) => r.value.value.decisions) };
 
   const applied = applyMerge(working, value);
   working = applied.model;
@@ -341,7 +362,9 @@ async function mergeAll(model: Model): Promise<{ model: Model; note: string; blo
   const conflicts = applied.blocked.conflicts;
   return {
     model: working,
-    note: `${pairs.length} pairs looked at, ${same} merged, ${conflicts} left contested.`,
+    note:
+      `${pairs.length} pairs looked at, ${same} merged, ${conflicts} left contested.` +
+      (skippedPairs ? ` ${skippedPairs} pairs not checked: the AI call for them failed, so they stay as separate boxes.` : ''),
     blocked,
   };
 }

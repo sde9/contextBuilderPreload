@@ -22,6 +22,8 @@ import * as runIdRoute from '../app/api/preload/run/[id]/route';
 import * as stepRoute from '../app/api/preload/step/route';
 import * as actRoute from '../app/api/preload/act/route';
 import * as healthRoute from '../app/api/preload/health/route';
+import { structured } from '../lib/llm';
+import { MergePatch, MERGE_JSON_SCHEMA } from '../lib/schema';
 
 let pass = 0;
 let fail = 0;
@@ -322,6 +324,34 @@ async function main() {
   const created = await body(await runRoute.POST(json({ title: 'x' })));
   check('starting a run says what to connect, instead of using a temporary disk', created.status === 500 && created.error === STORAGE_MISSING);
   delete process.env.VERCEL;
+
+  section('a cut-off answer gets more room, not a schema retry');
+  {
+    const seen: number[] = [];
+    let cutOffs = 1;
+    const before = globalThis.fetch;
+    globalThis.fetch = (async (_i: RequestInfo | URL, init?: RequestInit) => {
+      const b = JSON.parse(String(init?.body ?? '{}'));
+      seen.push(b.max_tokens);
+      const cut = cutOffs-- > 0;
+      return new Response(
+        JSON.stringify(
+          cut
+            ? { content: [{ type: 'tool_use', name: 'merge_patch', input: {} }], stop_reason: 'max_tokens', usage: { input_tokens: 1, output_tokens: 1 } }
+            : { content: [{ type: 'tool_use', name: 'merge_patch', input: { decisions: [] } }], stop_reason: 'tool_use', usage: { input_tokens: 1, output_tokens: 1 } }
+        ),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    const args = { model: 'm', system: 's', user: 'u', schemaName: 'merge_patch', jsonSchema: MERGE_JSON_SCHEMA, maxTokens: 4000 };
+    const ok = await structured(args, MergePatch).then(() => true, () => false);
+    check('one cut-off answer is asked again with double the tokens', ok && seen.join(',') === '4000,8000', seen.join(','));
+    seen.length = 0;
+    cutOffs = 5;
+    const err = await structured(args, MergePatch).then(() => '', (e: Error) => e.message);
+    check('two cut-off answers fail with a message about size, not shape', /cut off twice/.test(err) && seen.length === 2, err);
+    globalThis.fetch = before;
+  }
 
   console.log(`\n${pass} passed, ${fail} failed.\n`);
   if (fail > 0) process.exit(1);

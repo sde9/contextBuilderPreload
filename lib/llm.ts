@@ -71,13 +71,15 @@ async function callAnthropic(a: CallArgs): Promise<Answer> {
   const body = (await res.json()) as {
     content?: { type: string; input?: unknown }[];
     usage?: { input_tokens?: number; output_tokens?: number };
+    stop_reason?: string;
   };
+  const usage = body.usage ? { input: body.usage.input_tokens ?? 0, output: body.usage.output_tokens ?? 0 } : null;
+  // A cut-off answer is a size problem, not a shape problem. Say so, so the
+  // caller asks again with more room instead of feeding back schema errors.
+  if (body.stop_reason === 'max_tokens') return { value: null, usage, truncated: true };
   const block = body.content?.find((c) => c.type === 'tool_use');
   if (!block?.input) throw new LlmError('Anthropic returned no tool_use block', body);
-  return {
-    value: block.input,
-    usage: body.usage ? { input: body.usage.input_tokens ?? 0, output: body.usage.output_tokens ?? 0 } : null,
-  };
+  return { value: block.input, usage };
 }
 
 async function callOpenAI(a: CallArgs): Promise<Answer> {
@@ -117,7 +119,10 @@ async function callOpenAI(a: CallArgs): Promise<Answer> {
 }
 
 /** One provider answer, before validation. Usage is null when the provider sent none. */
-type Answer = { value: unknown; usage: Usage | null };
+type Answer = { value: unknown; usage: Usage | null; truncated?: boolean };
+
+/** Ceiling for the one bigger retry after a cut-off answer. */
+const MAX_TOKENS_CEILING = 16000;
 
 async function once(a: CallArgs): Promise<Answer> {
   return provider() === 'openai' ? callOpenAI(a) : callAnthropic(a);
@@ -139,7 +144,18 @@ export async function structured<T>(
 ): Promise<{ value: T; ms: number; usage: Usage | null }> {
   const started = Date.now();
 
-  const first = await once(a);
+  let first = await once(a);
+  if (first.truncated) {
+    const before = a.maxTokens ?? 2000;
+    const bigger = Math.min(before * 2, MAX_TOKENS_CEILING);
+    if (bigger <= before) throw new LlmError(`The answer was cut off at ${before} tokens. The request is too big for one call.`);
+    a = { ...a, maxTokens: bigger };
+    const again = await once(a);
+    if (again.truncated) {
+      throw new LlmError(`The answer was cut off twice (${before}, then ${bigger} tokens). The request is too big for one call.`);
+    }
+    first = { ...again, usage: addUsage(first.usage, again.usage) };
+  }
   const parsed = schema.safeParse(first.value);
   if (parsed.success) return { value: parsed.data, ms: Date.now() - started, usage: first.usage };
 
@@ -150,6 +166,7 @@ export async function structured<T>(
     user: `${a.user}\n\nYour previous answer did not fit the required shape:\n${issues}\nReturn the same information in the correct shape.`,
   });
 
+  if (retry.truncated) throw new LlmError(`The answer was cut off at ${a.maxTokens ?? 2000} tokens on the retry.`);
   const second = schema.safeParse(retry.value);
   if (second.success) return { value: second.data, ms: Date.now() - started, usage: addUsage(first.usage, retry.usage) };
 
