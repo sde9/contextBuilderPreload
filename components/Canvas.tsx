@@ -180,6 +180,10 @@ function Flow() {
         position: { x: cardsLeft + i * (CARD_WIDTH + CARD_GAP), y: bandY },
         draggable: false,
         selectable: false,
+        // A node that can be neither dragged nor selected gets pointer-events:
+        // none from React Flow, and clicks fall through to the canvas. The
+        // card has an answer field and buttons, so it must take them.
+        style: { pointerEvents: 'all' },
         measured: measured.get(q.id),
         data: { questionId: q.id, text: q.text, why: q.why, about: (q.anchorId && label.get(q.anchorId)) || '' },
       }));
