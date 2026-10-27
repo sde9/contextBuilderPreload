@@ -34,6 +34,8 @@ export type ConceptNodeData = {
   laterLabel?: string;
   /** True while an answer is being read, here or on another box. */
   answerBusy?: boolean;
+  /** Real-time only (RT-US-10). Questions about this concept waiting in the open questions panel. */
+  parkedQuestions?: number;
 };
 
 /*
@@ -167,6 +169,14 @@ export default function ConceptNode({ id, data }: NodeProps) {
         {d.saved && (
           <span className="badge badge-saved" title="Kept in the questions to ask">
             ✓
+          </span>
+        )}
+        {(d.parkedQuestions ?? 0) > 0 && (
+          <span
+            className="badge badge-parked"
+            title={`${d.parkedQuestions} open ${d.parkedQuestions === 1 ? 'question' : 'questions'} about this, in the panel on the right`}
+          >
+            ★{d.parkedQuestions}
           </span>
         )}
       </div>

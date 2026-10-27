@@ -685,3 +685,70 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
 
 .src-warn { grid-column: 1 / 3; font-size: 11px; color: var(--contested); margin-top: 3px; white-space: normal; line-height: 1.35; }
 .ev-skeleton { margin: 8px 0 -4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+
+/* ================================================================ Real-time Release 2 to 4 */
+
+.k-question { color: var(--question); font-weight: 600; }
+
+/* ---------------------------------------------------------------- start screen (RT-US-18) */
+
+.start-steps { margin-top: 22px; max-width: 520px; text-align: left; color: var(--ink); }
+.start-steps ol { margin: 0; padding-left: 22px; font-size: 14.5px; line-height: 1.6; }
+.start-steps li { margin: 3px 0; }
+.empty p.start-colours { margin-top: 12px; font-size: 13.5px; color: var(--muted); }
+
+/* ---------------------------------------------------------------- question cards (RT-US-06) */
+
+.question-card { width: 260px; max-width: 260px; border-color: var(--question) !important; border-style: dashed !important; background: #faf5ff !important; cursor: default; }
+.question-card .node-label { font-weight: 600; }
+.card-about { font-weight: 600; color: var(--ink); }
+
+/* A concept found from the panel is highlighted for a moment (RT-US-09). */
+.react-flow__node.node-focus { z-index: 10 !important; }
+.react-flow__node.node-focus .node { box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.45), 0 8px 24px rgba(124, 58, 237, 0.25); transition: box-shadow 0.2s; }
+
+/* Questions about this concept waiting in the panel (RT-US-10). */
+.badge.badge-parked { width: auto; min-width: 16px; padding: 0 5px; border-radius: 99px; background: var(--question); font-size: 10.5px; }
+
+/* ---------------------------------------------------------------- open questions panel (RT-US-09) */
+
+.later-title { color: var(--question); }
+.panel-hint { margin: -4px 0 12px; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.link-about { padding: 0; border: 0; background: none; font: inherit; font-weight: 600; color: var(--question); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.link-about:hover:not(:disabled) { background: none; color: var(--ink); }
+
+/* ---------------------------------------------------------------- Finish (RT-US-12 to 14) */
+
+.btn-finish, .btn-primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn-finish:hover:not(:disabled), .btn-primary:hover:not(:disabled) { background: #1e293b; }
+
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(15, 23, 42, 0.45); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.modal { width: 100%; max-width: 620px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; background: #fff; border-radius: 14px; box-shadow: 0 24px 60px rgba(15, 23, 42, 0.3); }
+.modal-head { padding: 18px 22px 12px; border-bottom: 1px solid var(--line); }
+.modal-head h2 { margin: 0 0 10px; font-size: 19px; }
+.steps { display: flex; gap: 16px; list-style: none; margin: 0; padding: 0; font-size: 13px; color: var(--muted); }
+.steps span { display: inline-block; width: 20px; height: 20px; line-height: 20px; text-align: center; border-radius: 50%; border: 1px solid var(--line); font-size: 11px; margin-right: 4px; }
+.steps .step-on { color: var(--ink); font-weight: 600; }
+.steps .step-on span { background: var(--ink); color: #fff; border-color: var(--ink); }
+.modal-body { padding: 16px 22px; overflow-y: auto; }
+.modal-lead { margin: 0 0 14px; font-size: 14px; line-height: 1.5; color: var(--muted); }
+.modal-empty { margin: 8px 0; font-size: 14px; color: var(--muted); font-style: italic; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 22px 16px; border-top: 1px solid var(--line); }
+
+.tick { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; font-size: 14px; line-height: 1.45; }
+.tick input { margin-top: 3px; }
+.tick-all { margin-bottom: 10px; font-weight: 600; }
+.review-list, .topic-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.review-list li { padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--question); border-radius: 8px; }
+.review-q { display: block; }
+.review-about { display: block; font-size: 12.5px; color: var(--muted); }
+.topic-list { counter-reset: topic; }
+.topic-list li { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.topic-why { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.topic-list .btn-no { flex: 0 0 auto; padding: 3px 9px; font-size: 12px; }
+.export-row { display: flex; flex-wrap: wrap; gap: 10px; }
+
+@media (max-width: 640px) {
+  .steps { gap: 10px; font-size: 12px; }
+  .modal-head, .modal-body, .modal-foot { padding-left: 16px; padding-right: 16px; }
+}

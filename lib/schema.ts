@@ -202,6 +202,8 @@ export const ProposePatchRT = ProposePatch.extend({
       text: z.string(),
       usefulness: z.number(),
       why: z.string().optional(),
+      /** RT-US-06. The concept the question is about, "" when none. Kept only when it is on the map. */
+      attachTo: z.string().optional(),
     })
   ),
 });
@@ -217,10 +219,75 @@ export const PROPOSE_RT_JSON_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['text', 'usefulness', 'why'],
+        required: ['text', 'usefulness', 'why', 'attachTo'],
         properties: {
           ...PROPOSE_JSON_SCHEMA.properties.questions.items.properties,
           why: { type: 'string', description: 'One short line on why this matters for the goal.' },
+          attachTo: {
+            type: 'string',
+            description: 'Id of the EXISTING concept this question is about. Empty string when it is about nothing on the map yet.',
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+/*
+ * Real-time variant of Call 1 (RT-US-08). One more field: which open
+ * questions the person's words clearly answer. It names ids only, so it
+ * cannot add anything to the map. Preload keeps the shared ExtractPatch.
+ */
+export const ExtractPatchRT = ExtractPatch.extend({
+  answersQuestionIds: z.array(z.string()).optional(),
+});
+
+export type ExtractPatchRT = z.infer<typeof ExtractPatchRT>;
+
+export const EXTRACT_RT_JSON_SCHEMA = {
+  ...EXTRACT_JSON_SCHEMA,
+  required: [...EXTRACT_JSON_SCHEMA.required, 'answersQuestionIds'],
+  properties: {
+    ...EXTRACT_JSON_SCHEMA.properties,
+    answersQuestionIds: {
+      type: 'array',
+      items: { type: 'string' },
+      description: "Ids from OPEN QUESTIONS that the person's words clearly answer. Empty if none.",
+    },
+  },
+} as const;
+
+// ---------------------------------------------------------------- Finish
+
+/*
+ * WrapupPatch (RT-US-13). Topics for the next conversation, at Finish.
+ * Text only: nothing here can change the map.
+ */
+export const WrapupPatch = z.object({
+  topics: z.array(
+    z.object({
+      title: z.string(),
+      why: z.string(),
+    })
+  ),
+});
+
+export type WrapupPatch = z.infer<typeof WrapupPatch>;
+
+export const WRAPUP_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['topics'],
+  properties: {
+    topics: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'why'],
+        properties: {
+          title: { type: 'string', description: 'The topic in 2-8 words, in the words the person used.' },
+          why: { type: 'string', description: 'One line on how talking about it moves the goal forward.' },
         },
       },
     },

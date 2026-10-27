@@ -199,6 +199,39 @@ export type Question = {
   answerStatementId?: string;
   /** Put off for later. Still OPEN, so the AI does not ask it again, but out of the main list. */
   parkedAt?: string;
+  /**
+   * Real-time, at Finish (RT-US-12). Set on an open question the person did
+   * not keep for the next conversation. The question is DONE and closed: the
+   * AI never asks it again.
+   */
+  droppedAt?: string;
+  /** Real-time, at Finish. True on an open question kept for the next conversation. */
+  kept?: boolean;
+};
+
+/*
+ * Where a question stands. Release 2 of the live session describes six
+ * states. They are read from the markers above rather than stored in
+ * `status`, because Preload counts `status === 'OPEN'` and files saved since
+ * 26 October already carry the markers. OPEN and PARKED are both still
+ * open to the AI; everything else is closed.
+ */
+export type QuestionState = 'OPEN' | 'PARKED' | 'ANSWERED' | 'DISMISSED' | 'DROPPED' | 'DONE';
+
+export function questionState(q: Question): QuestionState {
+  if (q.answeredAt) return 'ANSWERED';
+  if (q.dismissedAt) return 'DISMISSED';
+  if (q.droppedAt) return 'DROPPED';
+  if (q.status === 'DONE') return 'DONE';
+  return q.parkedAt ? 'PARKED' : 'OPEN';
+}
+
+/** Real-time, at Finish (RT-US-12, RT-US-13). */
+export type Wrapup = {
+  at: string;
+  keptQuestionIds: string[];
+  /** Topics for the next conversation. The person may remove any of them. */
+  topics: { title: string; why: string }[];
 };
 
 /**
@@ -259,7 +292,8 @@ export type LogEntry = {
     | 'goal'
     | 'outline'
     | 'question'
-    | 'answer';
+    | 'answer'
+    | 'finish';
   payload: unknown;
   /** Guard activity, so prompt failures are measurable rather than invisible. */
   blocked?: Blocked;
@@ -425,6 +459,12 @@ export type Model = {
   /** Normalised labels the user threw out. Permanent. Blocks inference, not speech. */
   rejected: { label: string; why: string; turn: number }[];
   log: LogEntry[];
+  /**
+   * Real-time. Set when the person pressed Finish and reviewed the open
+   * questions. Null until then. Optional, so Preload's own model builders
+   * (merge.ts) stay as they are.
+   */
+  wrapup?: Wrapup | null;
 
   // ---- preload ----------------------------------------------------------
   sources: Source[];
@@ -449,6 +489,7 @@ export function emptyModel(sessionId: string): Model {
     questions: [],
     rejected: [],
     log: [],
+    wrapup: null,
     sources: [],
     chunks: [],
     excerpts: [],
@@ -497,6 +538,13 @@ export function normaliseModel(raw: Partial<Model> & { sessionId?: string }): Mo
     clusters: raw.clusters ?? [],
     run: raw.run ?? null,
     log: raw.log ?? [],
+    wrapup: raw.wrapup
+      ? {
+          at: raw.wrapup.at ?? '',
+          keptQuestionIds: raw.wrapup.keptQuestionIds ?? [],
+          topics: (raw.wrapup.topics ?? []).map((t) => ({ title: t.title ?? '', why: t.why ?? '' })),
+        }
+      : null,
     outlines: raw.outlines ?? [],
   };
 }

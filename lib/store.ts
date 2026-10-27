@@ -8,12 +8,16 @@ import {
   applyAnswer,
   applyAutoLayout,
   applyExtract,
+  applyFinishReview,
   applyPropose,
   confirmConcept,
   confirmRelationship,
   contextPayload,
   dismissAny,
+  migrateQuestionConcepts,
   parkQuestion,
+  setWrapupTopics,
+  wrapupPayload,
   unparkQuestion,
   moveConcept,
   rejectConcept,
@@ -21,16 +25,20 @@ import {
   setGoal,
   withCallMeta,
 } from './reducer';
-import { AnswerPatch, ExtractPatch, ProposePatchRT } from './schema';
+import { AnswerPatch, ExtractPatchRT, ProposePatchRT, WrapupPatch } from './schema';
 import type { NodeSize } from './layout';
 import { toDrawioXml, toMermaid } from './export';
 import { saveDataUrl, saveText } from './download';
 import { clearSession, parseSessionFile } from './persist';
+import { toReportHtml } from './report';
 
 /** Most new questions per turn in a live session (RT-US-03). */
 const QUESTION_CAP = Number(process.env.NEXT_PUBLIC_QUESTION_CAP) || 2;
 
 export type Phase = 'idle' | 'reading' | 'thinking';
+
+/** Where the topics call at Finish has got to (RT-US-13). */
+export type TopicsPhase = 'idle' | 'loading' | 'done' | 'failed';
 
 type State = {
   model: Model;
@@ -74,6 +82,26 @@ type State = {
   back: (id: string) => void;
   toggleSuggestions: () => void;
   toggleAutoTidy: () => void;
+
+  /** RT-US-19. Off hides the links on screen; layout and the file keep them. */
+  showLinks: boolean;
+  toggleLinks: () => void;
+
+  /** RT-US-09. A concept to bring into view and highlight for a moment. */
+  focusConceptId: string;
+  focusConcept: (id: string) => void;
+  clearFocus: () => void;
+
+  /** RT-US-12. The Finish panel. Closing it at any step loses nothing. */
+  finishOpen: boolean;
+  openFinish: () => void;
+  closeFinish: () => void;
+  /** Keep the ticked questions, drop the rest, then ask for topics. */
+  finishReview: (keptIds: string[]) => Promise<void>;
+  topicsPhase: TopicsPhase;
+  removeTopic: (index: number) => void;
+  /** RT-US-14. One self-contained HTML report with the map as a picture. */
+  downloadReport: () => Promise<void>;
   reset: () => void;
   download: () => void;
   exportDrawio: () => void;
@@ -107,7 +135,7 @@ export const useSession = create<State>((set, get) => {
    * Phase 2 of a turn, shared by the composer and by an answer on the map:
    * what is missing, given what the map now holds. Silent on failure.
    */
-  const proposeAfter = async (after: Model, latest: string): Promise<void> => {
+  const proposeAfter = async (after: Model, latest: string, focusIds: string[] = []): Promise<void> => {
     if (!get().suggestions) {
       set({ phase: 'idle', pending: '' });
       return;
@@ -117,7 +145,7 @@ export const useSession = create<State>((set, get) => {
       const res = await fetch('/api/propose', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(contextPayload(after)),
+        body: JSON.stringify({ ...contextPayload(after), ...(focusIds.length ? { focusIds } : {}) }),
       });
 
       const body = await res.json();
@@ -126,6 +154,9 @@ export const useSession = create<State>((set, get) => {
         const applied = applyPropose(get().model, patch, Number(process.env.NEXT_PUBLIC_PROPOSAL_CAP) || 5, {
           questionCap: QUESTION_CAP,
           latestStatement: latest,
+          // RT-US-06. Live questions are records drawn as cards, never boxes.
+          questionsAsRecords: true,
+          ...(focusIds.length ? { focusIds } : {}),
         });
         set((s) => ({
           model: withCallMeta(applied.model, 'propose', metaOf(body)),
@@ -150,6 +181,10 @@ export const useSession = create<State>((set, get) => {
   lastMs: { extract: 0, propose: 0 },
   blocked: noBlocks(),
   capture: null,
+  showLinks: true,
+  focusConceptId: '',
+  finishOpen: false,
+  topicsPhase: 'idle',
 
   /*
    * The two-phase turn.
@@ -176,13 +211,18 @@ export const useSession = create<State>((set, get) => {
         body: JSON.stringify({
           text: trimmed,
           concepts: contextPayload(get().model).concepts,
+          // RT-US-08. Open questions, on the map or waiting, so an answer
+          // typed here can close one.
+          openQuestions: get()
+            .model.questions.filter((q) => q.status === 'OPEN' && !q.answeredAt)
+            .map((q) => ({ id: q.id, text: q.text })),
         }),
       });
 
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Extract failed (${res.status})`);
 
-      const patch = ExtractPatch.parse(body.patch);
+      const patch = ExtractPatchRT.parse(body.patch);
       const applied = applyExtract(get().model, patch, trimmed);
       afterExtract = withCallMeta(applied.model, 'extract', metaOf(body));
 
@@ -210,6 +250,8 @@ export const useSession = create<State>((set, get) => {
 
     let afterAnswer: Model;
     let answered = false;
+    let focusIds: string[] = [];
+    const before = new Set(get().model.concepts.map((c) => c.id));
     try {
       const res = await fetch('/api/answer', {
         method: 'POST',
@@ -223,6 +265,12 @@ export const useSession = create<State>((set, get) => {
       const applied = applyAnswer(get().model, questionId, trimmed, patch);
       afterAnswer = withCallMeta(applied.model, 'answer', metaOf(body));
       answered = applied.answered;
+      // RT-US-07. The next proposals stay with what the question was about
+      // and what the answer added.
+      if (input.anchor) {
+        const added = afterAnswer.concepts.filter((c) => !before.has(c.id)).map((c) => c.id);
+        focusIds = [input.anchor.id, ...added];
+      }
       set((s) => ({
         model: afterAnswer,
         blocked: applied.blocked,
@@ -233,7 +281,7 @@ export const useSession = create<State>((set, get) => {
       return { ok: false, answered: false };
     }
 
-    await proposeAfter(afterAnswer, trimmed);
+    await proposeAfter(afterAnswer, trimmed, focusIds);
     return { ok: true, answered };
   },
 
@@ -325,19 +373,79 @@ export const useSession = create<State>((set, get) => {
   back: (id) => set((s) => ({ model: unparkQuestion(s.model, id) })),
   toggleSuggestions: () => set((s) => ({ suggestions: !s.suggestions })),
   toggleAutoTidy: () => set((s) => ({ autoTidy: !s.autoTidy })),
+  toggleLinks: () => set((s) => ({ showLinks: !s.showLinks })),
+  focusConcept: (id) => set({ focusConceptId: id }),
+  clearFocus: () => set({ focusConceptId: '' }),
+
+  openFinish: () => set({ finishOpen: true }),
+  closeFinish: () => set({ finishOpen: false }),
+
+  finishReview: async (keptIds) => {
+    const reviewed = applyFinishReview(get().model, keptIds);
+    set({ model: reviewed, topicsPhase: 'loading' });
+    try {
+      const res = await fetch('/api/wrapup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(wrapupPayload(reviewed)),
+      });
+      const body = await res.json();
+      if (!res.ok || !body.patch) throw new Error(body.error || `No topics (${res.status})`);
+      const patch = WrapupPatch.parse(body.patch);
+      set((s) => ({ model: setWrapupTopics(s.model, patch.topics.slice(0, 5)), topicsPhase: 'done' }));
+    } catch {
+      // "No topics this time". The person goes on to the export.
+      set((s) => ({ model: setWrapupTopics(s.model, []), topicsPhase: 'failed' }));
+    }
+  },
+
+  removeTopic: (index) =>
+    set((s) => ({
+      model: setWrapupTopics(
+        s.model,
+        (s.model.wrapup?.topics ?? []).filter((_, i) => i !== index)
+      ),
+    })),
+
+  downloadReport: async () => {
+    const m = get().model;
+    let png = '';
+    const capture = get().capture;
+    if (capture) {
+      try {
+        png = await capture();
+      } catch {
+        // The report still goes out, with a line saying the picture is missing.
+      }
+    }
+    saveText(`${filenameBase(m)}.report.html`, 'text/html', toReportHtml(m, png));
+  },
+
   reset: () => {
     clearSession();
-    set({ model: emptyModel(newId('s')), phase: 'idle', pending: '', error: '', blocked: noBlocks() });
+    set({
+      model: emptyModel(newId('s')),
+      phase: 'idle',
+      pending: '',
+      error: '',
+      blocked: noBlocks(),
+      finishOpen: false,
+      topicsPhase: 'idle',
+      focusConceptId: '',
+    });
   },
 
   setGoal: (text) => set((s) => ({ model: setGoal(s.model, text) })),
 
-  restore: (model) => set({ model, phase: 'idle', pending: '', error: '', blocked: noBlocks() }),
+  // RT-US-11. Sessions from before Release 2 keep their questions as boxes;
+  // they come back as question cards like everything else.
+  restore: (model) =>
+    set({ model: migrateQuestionConcepts(model), phase: 'idle', pending: '', error: '', blocked: noBlocks(), topicsPhase: 'idle' }),
 
   openFile: async (file) => {
     try {
-      const model = parseSessionFile(await file.text());
-      set({ model, phase: 'idle', pending: '', error: '', blocked: noBlocks() });
+      const model = migrateQuestionConcepts(parseSessionFile(await file.text()));
+      set({ model, phase: 'idle', pending: '', error: '', blocked: noBlocks(), topicsPhase: 'idle', finishOpen: false });
     } catch (e) {
       set({ error: (e as Error).message });
     }

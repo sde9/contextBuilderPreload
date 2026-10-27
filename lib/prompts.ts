@@ -6,7 +6,7 @@
  * back to the wording that produced it.
  */
 
-export const PROMPT_VERSION = 'p6-2026-10-26';
+export const PROMPT_VERSION = 'p7-2026-10-27';
 
 const KIND_VOCAB = `
 KIND. Seven values, and they classify the ROLE a thing plays in the
@@ -142,13 +142,32 @@ map.
 export function extractUser(input: {
   text: string;
   concepts: { id: string; label: string; note: string; status: string }[];
+  /** Real-time only (RT-US-08). Printed only when there are any, so other callers get the same prompt as before. */
+  openQuestions?: { id: string; text: string }[];
 }): string {
   const list = input.concepts.length
     ? input.concepts.map((c) => `  ${c.id}  ${c.label}${c.note ? ` (${c.note})` : ''}`).join('\n')
     : '  (the map is empty)';
+  const open = input.openQuestions ?? [];
+  const questions = open.length
+    ? `\n\nOPEN QUESTIONS\n${open.map((q) => `  ${q.id}  ${q.text}`).join('\n')}`
+    : '';
 
-  return `CONCEPTS ALREADY ON THE MAP\n${list}\n\nWHAT THE PERSON JUST SAID\n"""\n${input.text}\n"""`;
+  return `CONCEPTS ALREADY ON THE MAP\n${list}${questions}\n\nWHAT THE PERSON JUST SAID\n"""\n${input.text}\n"""`;
 }
+
+/*
+ * Real-time only. Appended to EXTRACT_SYSTEM by app/api/extract/route.ts.
+ * Preload reads documents with EXTRACT_SYSTEM alone.
+ */
+export const EXTRACT_REALTIME_RULES = `
+ANSWERS. You may be given OPEN QUESTIONS that were asked earlier in the
+session. Put a question's id in answersQuestionIds only when the person's
+words clearly answer it. A partial answer, a maybe, or the same topic
+without an answer is not an answer: leave the id out. Whatever they said is
+still recorded as concepts in the usual way. If no question is answered,
+answersQuestionIds is an empty array.
+`.trim();
 
 /*
  * Real-time only. Appended to PROPOSE_SYSTEM by app/api/propose/route.ts.
@@ -174,11 +193,18 @@ words and does not need a yes or no from them.
 QUESTIONS. At most 2 per turn in total, counting concepts of kind QUESTION
 and the questions list together. Ask only what moves the goal forward. Give
 each list question a "why": one short line on how answering it helps the
-goal.
+goal. When a question is about something already on the map, put that
+concept's id in attachTo, so the question appears next to it. Use an empty
+string only when it is about nothing on the map yet.
 
 CLOSED TOPICS. Never ask again a question listed as answered or closed, in
 any wording. When the person has answered or closed a topic, stop digging
 into it. Go back to it only if their latest words reopen it.
+
+FOCUS. When you are given a FOCUS list, the person has just answered a
+question about those concepts. Propose only things attached to an id in that
+list: new concepts whose attachTo is one of them, links with at least one end
+in it, and questions whose attachTo is one of them. Anything else is dropped.
 `.trim();
 
 export function proposeUser(payload: {
@@ -195,6 +221,8 @@ export function proposeUser(payload: {
   omittedStatements?: number;
   answeredQuestions?: { text: string; answer: string }[];
   closedQuestions?: string[];
+  /** RT-US-07. After an answer on a card: the ids every proposal must attach to. */
+  focusIds?: string[];
 }): string {
   const concepts = payload.concepts.length
     ? payload.concepts
@@ -256,6 +284,67 @@ export function proposeUser(payload: {
       : []),
     ``,
     ...said,
+    ...(payload.focusIds?.length
+      ? [``, `FOCUS: only propose things attached to these ids: ${payload.focusIds.join(', ')}`]
+      : []),
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------- Finish
+
+/*
+ * RT-US-13. At Finish, after the person has reviewed the open questions:
+ * what to talk about next time. Text only, nothing reaches the map.
+ */
+export const WRAPUP_SYSTEM = `
+A live session has ended. You are given its goal, everything that was said,
+the map the person confirmed, the questions they kept for next time, and the
+topics they answered or closed.
+
+Suggest up to 5 topics for the NEXT conversation, each one a step towards the
+goal. A topic is 2 to 8 words in the person's own vocabulary. Its "why" is
+one line on how talking about it moves the goal forward.
+
+Never suggest a topic the person closed or already answered, in any wording.
+A kept question may become a topic when several of them belong together.
+Prefer what is missing for the goal over what is already well covered.
+
+Fewer is better. If the session left nothing worth continuing, return an
+empty list.
+`.trim();
+
+export function wrapupUser(payload: {
+  goal: string;
+  conversation: string[];
+  omittedStatements: number;
+  concepts: { id: string; label: string; note: string; kind: string }[];
+  relationships: { from: string; to: string; label: string }[];
+  keptQuestions: string[];
+  answeredQuestions: { text: string; answer: string }[];
+  closedQuestions: string[];
+}): string {
+  const lines = (items: string[], empty = '  (none)') => (items.length ? items.map((s) => `  - ${s}`).join('\n') : empty);
+  return [
+    `GOAL OF THE SESSION: ${payload.goal.trim() || '(not set)'}`,
+    ``,
+    `WHAT WAS SAID, oldest first`,
+    ...(payload.omittedStatements ? [`  (${payload.omittedStatements} earlier statements left out for length)`] : []),
+    lines(payload.conversation),
+    ``,
+    `THE MAP THE PERSON CONFIRMED`,
+    lines(payload.concepts.map((c) => `[${c.kind}] ${c.label}${c.note ? ` (${c.note})` : ''}`)),
+    ``,
+    `LINKS`,
+    lines(payload.relationships.map((r) => `${r.from} --${r.label}--> ${r.to}`)),
+    ``,
+    `QUESTIONS KEPT FOR NEXT TIME`,
+    lines(payload.keptQuestions),
+    ``,
+    `ANSWERED — do not suggest these`,
+    lines(payload.answeredQuestions.map((q) => `${q.text} Answer: ${q.answer}`)),
+    ``,
+    `CLOSED BY THE PERSON — never suggest these`,
+    lines(payload.closedQuestions),
   ].join('\n');
 }
 

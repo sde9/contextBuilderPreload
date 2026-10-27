@@ -16,10 +16,22 @@
  * ownership, orphan downgrade, cycle refusal, and re-parenting on reject.
  */
 
-import { emptyModel, normaliseModel, resolveKind } from '../lib/types';
+import { emptyModel, normaliseModel, questionState, resolveKind } from '../lib/types';
+import { outputModeFor } from '../lib/llm';
+import { escapeHtml, reportCounts, toReportHtml } from '../lib/report';
+import { extractUser, proposeUser } from '../lib/prompts';
 import { saidThisTurn } from '../lib/guards';
 import {
   activeQuestions,
+  applyFinishReview,
+  cardQuestions,
+  keptQuestions,
+  MAX_QUESTIONS_ON_MAP,
+  migrateQuestionConcepts,
+  parkedCountByAnchor,
+  parkedQuestions,
+  setWrapupTopics,
+  wrapupPayload,
   dismissAny,
   laterQuestions,
   parkQuestion,
@@ -755,6 +767,241 @@ check('a concept with a valid kind keeps it', resolveKind({ kind: 'RULE' }) === 
   ({ model: t } = applyExtract(t, { concepts: [], relationships: [] }, 'hello'));
   t = withCallMeta(t, 'extract', { model: 'claude-haiku-4-5-20251001', ms: 900, usage: { input: 120, output: 40 } });
   check('the extract log entry carries model, time and tokens', t.log.at(-1)?.meta?.usage?.input === 120 && t.log.at(-1)?.meta?.model === 'claude-haiku-4-5-20251001');
+}
+
+// ==== Release 2: questions as records (RT-US-06 to RT-US-11) ===================
+{
+  const said = (model: typeof m, text: string, labels: string[]) =>
+    applyExtract(
+      model,
+      {
+        concepts: labels.map((label, i) => ({ tempId: `n${i}`, label, note: '', matchesExistingId: '', kind: 'ENTITY' as const, belongsTo: '' })),
+        relationships: [],
+      },
+      text
+    ).model;
+
+  let r = said(emptyModel('s_r2'), 'We run a concert and a fair.', ['Concert', 'Fair']);
+  const concert = r.concepts.find((c) => c.label === 'Concert')!;
+  const fair = r.concepts.find((c) => c.label === 'Fair')!;
+
+  ({ model: r } = applyPropose(
+    r,
+    {
+      concepts: [
+        { tempId: 'p1', label: 'Who plays at the concert?', why: 'Musicians decide the date', attachTo: concert.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+        { tempId: 'p2', label: 'Ticket price', why: 'Concerts sell tickets', attachTo: concert.id, relationLabel: 'has', kind: 'ATTRIBUTE', isPropertyOfTarget: true },
+      ],
+      relationships: [],
+      questions: [{ text: 'Who runs the fair stalls?', usefulness: 4, why: 'Stalls need owners', attachTo: fair.id }],
+    },
+    5,
+    { questionCap: 2, questionsAsRecords: true }
+  ));
+  const boxQ = r.questions.find((q) => q.text === 'Who plays at the concert?');
+  check('R2: a QUESTION proposal becomes a record, not a box', !!boxQ && !r.concepts.some((c) => c.kind === 'QUESTION'));
+  check('R2: the record points at what it is about, with its why', boxQ?.anchorId === concert.id && boxQ?.why === 'Musicians decide the date');
+  check('R2: no link is made for a question record', !r.relationships.some((x) => x.to === boxQ?.id || x.from === boxQ?.id));
+  check('R2: a list question keeps its attachTo', r.questions.find((q) => q.text.startsWith('Who runs'))?.anchorId === fair.id);
+  check('R2: other proposals still become orange boxes', r.concepts.some((c) => c.label === 'Ticket price' && c.status === 'PROPOSED'));
+  check('R2: both questions are cards', cardQuestions(r).length === 2 && cardQuestions(r).every((q) => questionState(q) === 'OPEN'));
+
+  // An unknown attachTo is dropped to "".
+  const odd = applyPropose(r, { concepts: [], relationships: [], questions: [{ text: 'Where is it held?', usefulness: 3, why: '', attachTo: 'c_nope' }] }, 5, { questionsAsRecords: true }).model;
+  check('R2: an attachTo that is not on the map becomes ""', odd.questions.find((q) => q.text === 'Where is it held?')?.anchorId === '');
+
+  // Past five cards, new questions wait in the panel. Nothing is retired.
+  let full = r;
+  ({ model: full } = applyPropose(
+    full,
+    { concepts: [], relationships: [], questions: Array.from({ length: 6 }, (_, i) => ({ text: `Filler question ${i}?`, usefulness: 5, why: '', attachTo: concert.id })) },
+    5,
+    { questionsAsRecords: true }
+  ));
+  check(`R2: at most ${MAX_QUESTIONS_ON_MAP} cards on the map`, cardQuestions(full).length === MAX_QUESTIONS_ON_MAP);
+  check('R2: the rest wait as PARKED', parkedQuestions(full).length === 3 && parkedQuestions(full).every((q) => q.status === 'OPEN'));
+  check('R2: nothing is retired to DONE', !full.questions.some((q) => q.status === 'DONE'));
+  check('R2: waiting questions are counted on their concept', parkedCountByAnchor(full).get(concert.id) === 3);
+
+  // The same question in any state is never added twice.
+  const dismissed = dismissQuestion(r, boxQ!.id);
+  check('R2: a dismissed question reads as DISMISSED', questionState(dismissed.questions.find((q) => q.id === boxQ!.id)!) === 'DISMISSED');
+  const again = applyPropose(dismissed, { concepts: [], relationships: [], questions: [{ text: 'Who plays at the concert?', usefulness: 5, why: '', attachTo: concert.id }] }, 5, { questionsAsRecords: true }).model;
+  check('R2: a dismissed question is not asked again', again.questions.filter((q) => q.text === 'Who plays at the concert?').length === 1);
+
+  // Focus after an answer on a card (RT-US-07).
+  const focused = applyPropose(
+    r,
+    {
+      concepts: [
+        { tempId: 'p1', label: 'Sound engineer', why: '', attachTo: concert.id, relationLabel: 'needs', kind: 'ACTOR', isPropertyOfTarget: false },
+        { tempId: 'p2', label: 'Stall fee', why: '', attachTo: fair.id, relationLabel: 'charges', kind: 'ATTRIBUTE', isPropertyOfTarget: true },
+      ],
+      relationships: [{ from: concert.id, to: fair.id, label: 'shares a day with', why: '' }],
+      questions: [
+        { text: 'Who mixes the sound?', usefulness: 4, why: '', attachTo: concert.id },
+        { text: 'Is the fair indoors?', usefulness: 4, why: '', attachTo: fair.id },
+      ],
+    },
+    5,
+    { questionsAsRecords: true, focusIds: [concert.id] }
+  );
+  check('R2: focus keeps proposals attached to the focus', focused.model.concepts.some((c) => c.label === 'Sound engineer'));
+  check('R2: focus drops proposals attached elsewhere', !focused.model.concepts.some((c) => c.label === 'Stall fee'));
+  check('R2: focus keeps a link with one end in the focus', focused.model.relationships.some((x) => x.label === 'shares a day with'));
+  check('R2: focus drops questions about something else', focused.model.questions.some((q) => q.text === 'Who mixes the sound?') && !focused.model.questions.some((q) => q.text === 'Is the fair indoors?'));
+  check('R2: what focus drops is counted', focused.blocked.unattached === 2);
+  check('R2: FOCUS reaches the prompt', proposeUser({ ...contextPayload(r), focusIds: [concert.id] }).includes(`FOCUS: only propose things attached to these ids: ${concert.id}`));
+  check('R2: no FOCUS block without focus ids', !proposeUser(contextPayload(r)).includes('FOCUS'));
+
+  // Answer from the main input (RT-US-08).
+  const fairQ = r.questions.find((q) => q.text.startsWith('Who runs'))!;
+  const ans = applyExtract(
+    r,
+    { concepts: [{ tempId: 'n1', label: 'PTA', note: '', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' }], relationships: [], answersQuestionIds: [fairQ.id, 'q_unknown'] },
+    'The PTA runs the fair stalls.'
+  ).model;
+  const st = ans.statements.at(-1)!;
+  check('R2: an answer typed in the composer closes the question', questionState(ans.questions.find((q) => q.id === fairQ.id)!) === 'ANSWERED');
+  check('R2: it keeps the statement as its answer', ans.questions.find((q) => q.id === fairQ.id)?.answer === 'The PTA runs the fair stalls.' && ans.questions.find((q) => q.id === fairQ.id)?.answerStatementId === st.id);
+  check('R2: the statement points at the question it answered', st.questionId === fairQ.id);
+  check('R2: the other question stays open', questionState(ans.questions.find((q) => q.id === boxQ!.id)!) === 'OPEN');
+  check('R2: an unknown id changes nothing', ans.questions.length === r.questions.length);
+  check('R2: what was said is still recorded', visibleConcepts(ans).some((c) => c.label === 'PTA'));
+  check('R2: the AI hears the composer answer', contextPayload(ans).answeredQuestions.some((a) => a.text === fairQ.text));
+  const noIds = applyExtract(r, { concepts: [], relationships: [] }, 'nothing');
+  check('R2: a patch with no answersQuestionIds closes nothing', noIds.model.questions.every((q) => q.status === 'OPEN'));
+  check('R2: OPEN QUESTIONS reach the extract prompt', extractUser({ text: 'x', concepts: [], openQuestions: [{ id: fairQ.id, text: fairQ.text }] }).includes(`OPEN QUESTIONS\n  ${fairQ.id}  ${fairQ.text}`));
+  check('R2: no OPEN QUESTIONS block without questions', !extractUser({ text: 'x', concepts: [] }).includes('OPEN QUESTIONS'));
+
+  // Answer on a card goes through applyAnswer; the anchor ties loose answers.
+  const card = applyAnswer(r, boxQ!.id, 'Sam and Lee.', {
+    answersQuestion: true,
+    concepts: [{ tempId: 'a1', label: 'Sam and Lee', note: '', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' }],
+    relationships: [],
+    updates: [],
+    confirms: [],
+    rejects: [],
+  });
+  check('R2: a card answered on the map closes and keeps its answer', card.answered && questionState(card.model.questions.find((q) => q.id === boxQ!.id)!) === 'ANSWERED');
+  check('R2: and its answer is tied to what it was about', card.model.relationships.some((x) => x.from === concert.id && card.model.concepts.find((c) => c.id === x.to)?.label === 'Sam and Lee'));
+
+  // Later and back (RT-US-09).
+  const parked = parkQuestion(r, boxQ!.id);
+  check('R2: Later moves a card to the panel', questionState(parked.questions.find((q) => q.id === boxQ!.id)!) === 'PARKED' && !cardQuestions(parked).some((q) => q.id === boxQ!.id));
+  check('R2: Back to map returns it', cardQuestions(unparkQuestion(parked, boxQ!.id)).some((q) => q.id === boxQ!.id));
+
+  // Migration of old QUESTION boxes (RT-US-11).
+  let old = said(emptyModel('s_old'), 'The concert is on 12 December.', ['Concert']);
+  const oldConcert = old.concepts[0];
+  ({ model: old } = applyPropose(old, {
+    concepts: [
+      { tempId: 'p1', label: 'Who plays?', why: 'Musicians left', attachTo: oldConcert.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+      { tempId: 'p2', label: 'Where is it?', why: 'Venue', attachTo: oldConcert.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+      { tempId: 'p3', label: 'Is it free?', why: 'Price', attachTo: oldConcert.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+    ],
+    relationships: [],
+    questions: [],
+  }));
+  const [b1, b2, b3] = old.concepts.filter((c) => c.kind === 'QUESTION');
+  old = parkQuestion(old, b2.id);
+  old = applyAnswer(old, b3.id, 'Yes, free.', { answersQuestion: true, concepts: [], relationships: [], updates: [], confirms: [], rejects: [] }).model;
+  const migrated = migrateQuestionConcepts(normaliseModel(JSON.parse(JSON.stringify(old))));
+  check('R2: migration leaves no QUESTION boxes in play', !migrated.concepts.some((c) => c.kind === 'QUESTION'));
+  check('R2: migration removes their links', !migrated.relationships.some((x) => [b1.id, b2.id, b3.id].includes(x.from) || [b1.id, b2.id, b3.id].includes(x.to)));
+  check('R2: a box becomes a card with the same id, about the same concept', cardQuestions(migrated).some((q) => q.id === b1.id && q.anchorId === oldConcert.id && q.why === 'Musicians left'));
+  check('R2: a box put off stays put off', questionState(migrated.questions.find((q) => q.id === b2.id)!) === 'PARKED');
+  check('R2: an answered box keeps its answer', questionState(migrated.questions.find((q) => q.id === b3.id)!) === 'ANSWERED' && migrated.questions.find((q) => q.id === b3.id)?.answer === 'Yes, free.');
+  check('R2: the answer statement still finds its question', conversationWindow(migrated).lines.some((l) => l.includes('answer to "Is it free?"')));
+  check('R2: migration twice changes nothing', migrateQuestionConcepts(migrated) === migrated);
+  check('R2: normaliseModel alone does not migrate (Preload)', normaliseModel(JSON.parse(JSON.stringify(old))).concepts.some((c) => c.kind === 'QUESTION'));
+
+  // A file with too many open list questions shows five cards.
+  let many = said(emptyModel('s_many'), 'x', ['Thing']);
+  ({ model: many } = applyPropose(many, { concepts: [], relationships: [], questions: Array.from({ length: 7 }, (_, i) => ({ text: `Old question ${i}?`, usefulness: 5 })) }));
+  check('R2: an old file with seven open questions shows five cards', cardQuestions(migrateQuestionConcepts(many)).length === MAX_QUESTIONS_ON_MAP);
+
+  // Without the option, propose behaves as before (Preload).
+  const plain = applyPropose(said(emptyModel('s_plain'), 'x', ['Thing']), {
+    concepts: [{ tempId: 'p1', label: 'Who owns it?', why: '', attachTo: '', relationLabel: '', kind: 'QUESTION', isPropertyOfTarget: false }],
+    relationships: [],
+    questions: [],
+  });
+  check('R2: without the option nothing changes for an unattached question', plain.blocked.unattached === 1);
+}
+
+// ==== Release 3: Finish (RT-US-12 to RT-US-14) =================================
+{
+  let f = applyExtract(
+    emptyModel('s_finish'),
+    {
+      concepts: [
+        { tempId: 'n1', label: 'Concert', note: '12 December', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' },
+        { tempId: 'n2', label: 'Anna', note: 'runs the choir', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' },
+      ],
+      relationships: [{ from: 'n2', to: 'n1', label: 'organises' }],
+    },
+    'Anna organises the concert on 12 December <script>alert(1)</script>.'
+  ).model;
+  f = setGoal(f, 'Plan the <b>concert</b> & fair');
+  const concert = f.concepts.find((c) => c.label === 'Concert')!;
+  ({ model: f } = applyPropose(
+    f,
+    {
+      concepts: [
+        { tempId: 'p1', label: 'Sound system', why: '', attachTo: concert.id, relationLabel: 'needs', kind: 'ENTITY', isPropertyOfTarget: false },
+        { tempId: 'p2', label: 'Raffle', why: '', attachTo: concert.id, relationLabel: 'includes', kind: 'ENTITY', isPropertyOfTarget: false },
+      ],
+      relationships: [],
+      questions: [
+        { text: 'Who plays?', usefulness: 5, why: 'The line-up sets the length', attachTo: concert.id },
+        { text: 'Is there food?', usefulness: 4, why: '', attachTo: '' },
+        { text: 'Who pays the hall?', usefulness: 3, why: '', attachTo: concert.id },
+      ],
+    },
+    5,
+    { questionsAsRecords: true }
+  ));
+  f = confirmConcept(f, f.concepts.find((c) => c.label === 'Sound system')!.id);
+  f = rejectConcept(f, f.concepts.find((c) => c.label === 'Raffle')!.id);
+  const plays = f.questions.find((q) => q.text === 'Who plays?')!;
+  const food = f.questions.find((q) => q.text === 'Is there food?')!;
+  const hall = f.questions.find((q) => q.text === 'Who pays the hall?')!;
+  f = parkQuestion(f, hall.id);
+
+  const done = applyFinishReview(f, [plays.id, hall.id]);
+  check('R3: ticked questions are kept, on the map or waiting', keptQuestions(done).map((q) => q.id).sort().join() === [plays.id, hall.id].sort().join());
+  check('R3: the others are dropped and closed', questionState(done.questions.find((q) => q.id === food.id)!) === 'DROPPED' && closedQuestions(done).includes(food.text));
+  check('R3: Finish is recorded', done.wrapup?.keptQuestionIds.length === 2 && done.log.at(-1)?.kind === 'finish');
+  check('R3: the wrap-up call gets the kept questions and the closed ones', wrapupPayload(done).keptQuestions.includes('Who plays?') && wrapupPayload(done).closedQuestions.includes('Is there food?'));
+  check('R3: the wrap-up call gets only the confirmed map', !wrapupPayload(done).concepts.some((c) => c.label === 'Raffle') && wrapupPayload(done).concepts.some((c) => c.label === 'Sound system'));
+
+  const topics = setWrapupTopics(done, [{ title: ' Line-up ', why: 'Sets the length' }, { title: '', why: 'empty' }]);
+  check('R3: topics are kept, trimmed, empty ones left out', topics.wrapup?.topics.length === 1 && topics.wrapup?.topics[0].title === 'Line-up');
+  check('R3: the topics survive a save and reload', normaliseModel(JSON.parse(JSON.stringify(topics))).wrapup?.topics[0].title === 'Line-up');
+  check('R3: an old file loads with no wrap-up', normaliseModel({ concepts: [] }).wrapup === null);
+
+  const n = reportCounts(topics);
+  check('R3: the report counts what was said, confirmed, rejected and kept', n.said === 2 && n.confirmed === 1 && n.rejected === 1 && n.kept === 2);
+  const html = toReportHtml(topics, 'data:image/png;base64,AAAA');
+  const order = ['<h2>Goal</h2>', '<h2>What we covered</h2>', '<h2>Open questions</h2>', '<h2>Topics to continue</h2>', '<h2>Map</h2>'].map((h) => html.indexOf(h));
+  check('R3: the report has its five sections in order', order.every((i, k) => i > 0 && (k === 0 || i > order[k - 1])));
+  check('R3: text is escaped', html.includes('Plan the &lt;b&gt;concert&lt;/b&gt; &amp; fair') && !html.includes('<b>concert</b>'));
+  check('R3: nothing rejected appears in the report', !html.includes('Raffle'));
+  check('R3: kept questions appear with their subject', html.includes('Who plays?') && html.includes('The line-up sets the length'));
+  check('R3: the map is an image', html.includes('<img class="map" src="data:image/png;base64,AAAA"'));
+  check('R3: anything but a PNG data URL is refused', !toReportHtml(topics, 'javascript:alert(1)').includes('javascript:'));
+  check('R3: the report prints to A4', html.includes('@page { size: A4; margin: 16mm; }') && html.includes('break-inside: avoid'));
+  check('R3: escapeHtml escapes quotes', escapeHtml(`"a" 'b'`) === '&quot;a&quot; &#39;b&#39;');
+}
+
+// ==== Release 4: model output mode (RT-US-05) ==================================
+{
+  check('R4: Opus 5.5 uses structured outputs', outputModeFor('claude-opus-5-5', undefined) === 'json');
+  check('R4: Sonnet 5.5 uses structured outputs', outputModeFor('claude-sonnet-5-5', 'tool') === 'json');
+  check('R4: Fable uses structured outputs', outputModeFor('claude-fable-5-1', undefined) === 'json');
+  check('R4: Haiku 4.5 keeps forced tool use by default', outputModeFor('claude-haiku-4-5-20251001', undefined) === 'tool');
+  check('R4: the setting can switch any model to json', outputModeFor('claude-haiku-4-5-20251001', 'json') === 'json');
 }
 
 console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) failed.`}`);

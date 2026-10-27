@@ -4,7 +4,8 @@ import { useEffect, useRef } from 'react';
 import Link from 'next/link';
 import Canvas from '@/components/Canvas';
 import Composer from '@/components/Composer';
-import GapBar from '@/components/GapBar';
+import OpenQuestionsPanel from '@/components/OpenQuestionsPanel';
+import FinishPanel from '@/components/FinishPanel';
 import GoalBadge from '@/components/GoalBadge';
 import GoalStart from '@/components/GoalStart';
 import RestoreBar from '@/components/RestoreBar';
@@ -15,6 +16,24 @@ import ShapeLegend, { LIVE_SHAPES } from '@/components/ShapeLegend';
 
 /** How long the model must sit still before it is written to the browser. */
 const AUTOSAVE_MS = 800;
+
+/** RT-US-18. How a session goes, in four steps, and what the colours mean. */
+function StartSteps() {
+  return (
+    <div className="start-steps">
+      <ol>
+        <li>Set a goal: what you want to get out of the conversation.</li>
+        <li>Talk, or paste what was just said, and press Continue.</li>
+        <li>Answer the questions under the map, or put them off with Later.</li>
+        <li>Press Finish to keep the questions that matter and get a report.</li>
+      </ol>
+      <p className="start-colours">
+        <span className="k-green">Green</span> is what was said. <span className="k-orange">Orange</span> is a guess to
+        confirm or reject. A <span className="k-question">question</span> gets an answer.
+      </p>
+    </div>
+  );
+}
 
 export default function Page() {
   const model = useSession((s) => s.model);
@@ -27,6 +46,9 @@ export default function Page() {
   const exportMermaid = useSession((s) => s.exportMermaid);
   const openFile = useSession((s) => s.openFile);
   const reset = useSession((s) => s.reset);
+  const showLinks = useSession((s) => s.showLinks);
+  const toggleLinks = useSession((s) => s.toggleLinks);
+  const openFinish = useSession((s) => s.openFinish);
   const lastMs = useSession((s) => s.lastMs);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -101,6 +123,14 @@ export default function Page() {
             <input type="checkbox" checked={autoTidy} onChange={toggleAutoTidy} />
             Auto-layout
           </label>
+          {/* RT-US-19. Hides the links on screen only. Boxes stay where they are; the file keeps every link. */}
+          <label className="toggle" title="Show or hide the links between boxes">
+            <input type="checkbox" checked={showLinks} onChange={toggleLinks} />
+            Links
+          </label>
+          <button className="btn-finish" onClick={openFinish} disabled={!started} title="Review open questions, get topics for next time and a report">
+            Finish
+          </button>
           <button onClick={download} disabled={!started}>
             Download
           </button>
@@ -150,17 +180,13 @@ export default function Page() {
               <h1>Start with the goal.</h1>
               <p>Say what you want to get out of the conversation. The AI uses it to choose what to ask.</p>
               <GoalStart />
+              <StartSteps />
             </div>
           )}
           {model.turn === 0 && model.goal && (
             <div className="empty">
               <h1>Say something and watch it take shape.</h1>
-              <p>
-                Paste a piece of what someone just said, then press Continue.
-                <br />
-                <span className="k-green">Green</span> is what they said.{' '}
-                <span className="k-orange">Orange</span> is what the AI guessed.
-              </p>
+              <StartSteps />
               <p className="hint">
                 Try: <em>&ldquo;I am working on the payment process for my Unison choir.&rdquo;</em>
               </p>
@@ -168,13 +194,16 @@ export default function Page() {
           )}
           <Canvas />
         </section>
-        <GapBar />
+        <OpenQuestionsPanel />
       </div>
+
+      <FinishPanel />
 
       <footer className="bottom">
         <div className="legend">
           <span className="k-green">■</span> said &nbsp;
-          <span className="k-orange">■</span> guessed, needs a yes or no
+          <span className="k-orange">■</span> a guess: confirm or reject &nbsp;
+          <span className="k-question">■</span> a question: answer it, put it off with Later, or dismiss it
         </div>
         <ShapeLegend kinds={LIVE_SHAPES} sizeNote={false} />
         <Composer />

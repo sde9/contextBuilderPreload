@@ -1,6 +1,6 @@
 import type { Blocked, CallMeta, Concept, Excerpt, Kind, LogEntry, Model, Question, Relationship, Statement } from './types';
-import { conceptDefaults, newId, noBlocks } from './types';
-import type { AnswerPatch, ExtractPatch, ExtractPatchPL, ProposePatch, ProposePatchRT } from './schema';
+import { conceptDefaults, newId, noBlocks, questionState } from './types';
+import type { AnswerPatch, ExtractPatch, ExtractPatchPL, ExtractPatchRT, ProposePatch, ProposePatchRT } from './schema';
 import type { AnswerInput } from './prompts';
 import { capProposals, clearRejection, findDuplicate, isRejected, norm, saidThisTurn, wouldCreateCycle } from './guards';
 import { place, pointsOf, type PlaceKind, type Point } from './place';
@@ -76,7 +76,7 @@ export type WrittenEvidence = {
 
 export function applyExtract(
   model: Model,
-  patch: ExtractPatch | ExtractPatchPL,
+  patch: ExtractPatch | ExtractPatchPL | ExtractPatchRT,
   statementText: string,
   /**
    * Preload passes this. The only difference it makes is which array the
@@ -221,16 +221,40 @@ export function applyExtract(
   const taken = pointsOf(concepts.filter((c) => !created.includes(c.id)));
   layoutNewNodes(concepts, relationships, created, taken, 'extract');
 
+  // RT-US-08. Open questions the person's words clearly answer, named by the
+  // live extract call. Only ids of questions still open count; anything else
+  // is ignored. Preload's patches have no such field.
+  const answering = written ? [] : [...new Set(('answersQuestionIds' in patch ? patch.answersQuestionIds : undefined) ?? [])];
+  const answeredIds: string[] = [];
+  let questions = model.questions;
+  if (answering.length) {
+    const open = new Set(model.questions.filter((q) => q.status === 'OPEN' && !q.answeredAt).map((q) => q.id));
+    for (const id of answering) if (open.has(id)) answeredIds.push(id);
+    if (answeredIds.length) {
+      questions = model.questions.map((q) =>
+        answeredIds.includes(q.id)
+          ? { ...q, status: 'DONE' as const, answer: statementText, answeredAt: at, answerStatementId: statement.id, parkedAt: '' }
+          : q
+      );
+    }
+  }
+  const spoken: Statement | Excerpt =
+    !written && answeredIds.length ? { ...(statement as Statement), questionId: answeredIds[0] } : statement;
+
   const next: Model = {
     ...model,
     turn,
     title: model.title === 'Untitled session' && concepts[0] ? concepts[0].label : model.title,
-    statements: written ? model.statements : [...model.statements, statement as Statement],
+    questions,
+    statements: written ? model.statements : [...model.statements, spoken as Statement],
     excerpts: written ? [...model.excerpts, statement as Excerpt] : model.excerpts,
     concepts,
     relationships,
     rejected,
-    log: [...model.log, { turn, at, kind: 'extract', payload: patch, blocked }],
+    log: [
+      ...model.log,
+      { turn, at, kind: 'extract', payload: answeredIds.length ? { ...patch, answered: answeredIds } : patch, blocked },
+    ],
   };
 
   return { model: next, blocked };
@@ -318,9 +342,24 @@ export type ProposeOptions = {
    * echo of the speaker, not a guess, so it is dropped.
    */
   latestStatement?: string;
+  /**
+   * RT-US-06. Questions are their own records, never boxes. A QUESTION
+   * proposal becomes a Question that points at what it is about; no concept
+   * and no link are made. Questions past MAX_QUESTIONS_ON_MAP open ones wait
+   * in the open questions panel instead of being retired.
+   */
+  questionsAsRecords?: boolean;
+  /**
+   * RT-US-07. After an answer on a card: only proposals attached to these ids
+   * (the concept the question was about, and what the answer added).
+   */
+  focusIds?: string[];
 };
 
-type QuestionIn = { text: string; usefulness: number; why?: string };
+/** RT-US-06. Most question cards on the map at once. The rest wait in the panel. */
+export const MAX_QUESTIONS_ON_MAP = 5;
+
+type QuestionIn = { text: string; usefulness: number; why?: string; anchorId?: string };
 
 export function applyPropose(
   model: Model,
@@ -334,13 +373,15 @@ export function applyPropose(
 
   const concepts = model.concepts.map((c) => ({ ...c }));
   const relationships = model.relationships.map((r) => ({ ...r }));
+  const focus = opts.focusIds?.length ? new Set(opts.focusIds) : null;
+  const records = Boolean(opts.questionsAsRecords);
 
   const seenThisTurn = new Set<string>();
   const filtered = patch.concepts.filter((pc) => {
     if (!pc.label.trim()) return false;
 
     const anchor = concepts.find((c) => c.id === pc.attachTo && visible(c));
-    if (!anchor) {
+    if (!anchor || (focus && !focus.has(anchor.id))) {
       blocked.unattached++;
       return false;
     }
@@ -378,7 +419,17 @@ export function applyPropose(
     return false;
   });
 
-  const { keep, overflow } = capProposals(candidates, cap);
+  // With questions as records, a QUESTION proposal never becomes a box. It is
+  // a question about the concept it was attached to, and it does not take a
+  // place under the concept cap.
+  const askedAbout: QuestionIn[] = records
+    ? candidates
+        .filter((pc) => pc.kind === 'QUESTION')
+        .map((pc) => ({ text: pc.label.trim(), usefulness: 4, why: (pc.why ?? '').trim(), anchorId: pc.attachTo }))
+    : [];
+  const asNodes = records ? candidates.filter((pc) => pc.kind !== 'QUESTION') : candidates;
+
+  const { keep, overflow } = capProposals(asNodes, cap);
   blocked.capped += overflow.length;
 
   const taken = pointsOf(concepts);
@@ -442,7 +493,7 @@ export function applyPropose(
     if (!pr.label.trim() || pr.from === pr.to) return false;
     const from = concepts.find((c) => c.id === pr.from && visible(c));
     const to = concepts.find((c) => c.id === pr.to && visible(c));
-    if (!from || !to) {
+    if (!from || !to || (focus && !focus.has(from.id) && !focus.has(to.id))) {
       blocked.unattached++;
       return false;
     }
@@ -479,18 +530,37 @@ export function applyPropose(
     text: `${pc.label}${pc.label.trim().endsWith('?') ? '' : '?'} ${pc.why}`.trim(),
     usefulness: 3,
     why: '',
+    ...(records ? { anchorId: pc.attachTo } : {}),
   }));
 
-  let incoming: QuestionIn[] = [...(patch.questions as QuestionIn[]), ...overflowQuestions];
+  // The list questions. Live questions may name what they are about; an id
+  // that is not on the map is dropped to "". With a focus set, a question
+  // about something outside it is not this turn's business.
+  const visibleIds = new Set(concepts.filter(visible).map((c) => c.id));
+  const listedIn: QuestionIn[] = [];
+  for (const q of patch.questions as (QuestionIn & { attachTo?: string })[]) {
+    const anchorId = q.attachTo && visibleIds.has(q.attachTo) ? q.attachTo : '';
+    if (focus && !(anchorId && focus.has(anchorId))) {
+      blocked.unattached++;
+      continue;
+    }
+    listedIn.push({ text: q.text, usefulness: q.usefulness, why: q.why, ...(records ? { anchorId } : {}) });
+  }
+
+  let incoming: QuestionIn[] = [...listedIn, ...overflowQuestions];
   if (opts.questionCap !== undefined) {
     // Most useful first, then whatever the per-turn budget still allows.
-    const listed = [...(patch.questions as QuestionIn[])].sort((a, b) => (b.usefulness || 0) - (a.usefulness || 0));
+    // Question proposals asked about a concept were already counted.
+    const listed = [...listedIn].sort((a, b) => (b.usefulness || 0) - (a.usefulness || 0));
     const all = [...listed, ...overflowQuestions];
     incoming = all.slice(0, Math.max(0, questionBudget));
     blocked.capped += all.length - incoming.length;
   }
+  incoming = [...askedAbout, ...incoming];
 
-  const questions = mergeQuestions(model.questions, incoming, turn);
+  const questions = records
+    ? mergeQuestionRecords(model, incoming, turn, at)
+    : mergeQuestions(model.questions, incoming, turn);
 
   const next: Model = {
     ...model,
@@ -529,6 +599,42 @@ function mergeQuestions(current: Question[], incoming: QuestionIn[], turn: numbe
   const open = out.filter((q) => q.status === 'OPEN' && !q.parkedAt).sort((a, b) => b.usefulness - a.usefulness);
   const keep = new Set(open.slice(0, MAX_OPEN_QUESTIONS).map((q) => q.id));
   return out.map((q) => (q.status === 'OPEN' && !q.parkedAt && !keep.has(q.id) ? { ...q, status: 'DONE' as const } : q));
+}
+
+/**
+ * RT-US-06. Questions as records. Same dedupe as mergeQuestions: a question
+ * asked before in the same words, in any state, is never added again, and
+ * neither is the label of a question box the person rejected. Nothing is
+ * retired: past MAX_QUESTIONS_ON_MAP open cards, a new question waits in the
+ * open questions panel (PARKED) until there is room or the person asks for it.
+ */
+function mergeQuestionRecords(model: Model, incoming: QuestionIn[], turn: number, at: string): Question[] {
+  const out = model.questions.map((q) => ({ ...q }));
+  const seen = new Set([
+    ...out.map((q) => norm(q.text)),
+    ...model.concepts.filter((c) => c.kind === 'QUESTION' && c.status === 'REJECTED').map((c) => norm(c.label)),
+  ]);
+  let onMap = out.filter((q) => questionState(q) === 'OPEN').length;
+
+  for (const q of incoming) {
+    const n = norm(q.text);
+    if (!q.text.trim() || seen.has(n)) continue;
+    seen.add(n);
+    const park = onMap >= MAX_QUESTIONS_ON_MAP;
+    if (!park) onMap++;
+    out.push({
+      id: newId('q'),
+      text: q.text.trim(),
+      why: (q.why ?? '').trim(),
+      usefulness: Math.max(1, Math.min(5, Math.round(q.usefulness || 3))),
+      status: 'OPEN',
+      turn,
+      dismissedAt: '',
+      anchorId: q.anchorId ?? '',
+      ...(park ? { parkedAt: at } : {}),
+    });
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------ user actions
@@ -727,7 +833,8 @@ export function conversationWindow(m: Model, limit = CONVERSATION_CHAR_LIMIT): {
  * they rejected. The AI is told never to ask these again.
  */
 export function closedQuestions(m: Model): string[] {
-  const dismissed = m.questions.filter((q) => q.dismissedAt).map((q) => q.text);
+  // Dismissed, and dropped at Finish. An old file's dismissed DONE carries dismissedAt too.
+  const dismissed = m.questions.filter((q) => q.dismissedAt || q.droppedAt).map((q) => q.text);
   const rejected = m.concepts.filter((c) => c.kind === 'QUESTION' && c.status === 'REJECTED').map((c) => c.label);
   return [...dismissed, ...rejected];
 }
@@ -792,6 +899,152 @@ export function unparkQuestion(model: Model, id: string, at = new Date().toISOSt
 export function dismissAny(model: Model, id: string): Model {
   if (model.questions.some((q) => q.id === id)) return dismissQuestion(model, id);
   return rejectConcept(model, id);
+}
+
+// ------------------------------------------------------------------ live: questions as records (Release 2)
+
+/** RT-US-06. The questions drawn as cards on the live map: open, not put off, oldest first. */
+export function cardQuestions(m: Model): Question[] {
+  return m.questions.filter((q) => questionState(q) === 'OPEN');
+}
+
+/** RT-US-09. The questions waiting in the open questions panel, newest first. */
+export function parkedQuestions(m: Model): Question[] {
+  return m.questions
+    .filter((q) => questionState(q) === 'PARKED')
+    .sort((a, b) => (b.parkedAt ?? '').localeCompare(a.parkedAt ?? ''));
+}
+
+/** RT-US-10. How many waiting questions are about each concept. */
+export function parkedCountByAnchor(m: Model): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const q of parkedQuestions(m)) {
+    if (q.anchorId) out.set(q.anchorId, (out.get(q.anchorId) ?? 0) + 1);
+  }
+  return out;
+}
+
+/**
+ * RT-US-11. A file or a restored session from before Release 2 holds its
+ * questions as QUESTION boxes. Each one still in play becomes a question
+ * record with the same id (so an answer statement still points at it), about
+ * the concept its first visible link went to; the box and its links go.
+ * An answered box keeps its answer. A rejected box stays as it is, hidden,
+ * and still counts as a closed topic.
+ *
+ * Real-time only, on Restore and Open. Never in normaliseModel, which
+ * Preload uses.
+ */
+export function migrateQuestionConcepts(model: Model, at = new Date().toISOString()): Model {
+  const boxes = model.concepts.filter((c) => c.kind === 'QUESTION' && c.status !== 'REJECTED' && !c.absorbedInto);
+  const openCards = model.questions.filter((q) => questionState(q) === 'OPEN').length;
+  if (!boxes.length && openCards <= MAX_QUESTIONS_ON_MAP) return model;
+
+  const ids = new Set(boxes.map((c) => c.id));
+  const live = (r: Relationship) => r.status !== 'REJECTED';
+  const anchorOf = (id: string): string => {
+    const link = model.relationships.find((r) => live(r) && (r.from === id || r.to === id) && !ids.has(r.from === id ? r.to : r.from));
+    if (!link) return '';
+    const other = link.from === id ? link.to : link.from;
+    return model.concepts.some((c) => c.id === other && visible(c)) ? other : '';
+  };
+
+  const known = new Set(model.questions.map((q) => norm(q.text)));
+  const records: Question[] = [];
+  for (const c of boxes) {
+    if (known.has(norm(c.label))) continue;
+    known.add(norm(c.label));
+    records.push({
+      id: c.id,
+      text: c.label,
+      why: c.note,
+      usefulness: 4,
+      status: c.answeredAt ? 'DONE' : 'OPEN',
+      turn: c.turn,
+      dismissedAt: '',
+      anchorId: anchorOf(c.id),
+      ...(c.answeredAt ? { answer: c.answer ?? '', answeredAt: c.answeredAt, answerStatementId: c.answerStatementId ?? '' } : {}),
+      ...(c.parkedAt && !c.answeredAt ? { parkedAt: c.parkedAt } : {}),
+    });
+  }
+
+  // More open cards than the map holds: the newest wait in the panel.
+  let questions = [...model.questions, ...records];
+  const open = questions.filter((q) => questionState(q) === 'OPEN');
+  if (open.length > MAX_QUESTIONS_ON_MAP) {
+    const wait = new Set(open.slice(MAX_QUESTIONS_ON_MAP).map((q) => q.id));
+    questions = questions.map((q) => (wait.has(q.id) ? { ...q, parkedAt: at } : q));
+  }
+
+  return {
+    ...model,
+    concepts: model.concepts.filter((c) => !ids.has(c.id)),
+    relationships: model.relationships.filter((r) => !ids.has(r.from) && !ids.has(r.to)),
+    questions,
+    log: boxes.length
+      ? [
+          ...model.log,
+          { turn: model.turn, at, kind: 'question' as const, payload: { action: 'migrate', questionIds: boxes.map((c) => c.id) } },
+        ]
+      : model.log,
+  };
+}
+
+// ------------------------------------------------------------------ live: Finish (Release 3)
+
+/**
+ * RT-US-12. The person reviewed the open questions at Finish. Ticked ones are
+ * kept for the next conversation; every other open question, on the map or
+ * waiting in the panel, is dropped and closed for good.
+ */
+export function applyFinishReview(model: Model, keptIds: string[], at = new Date().toISOString()): Model {
+  const keep = new Set(keptIds);
+  const open = new Set(model.questions.filter((q) => q.status === 'OPEN' && !q.answeredAt).map((q) => q.id));
+  const kept = [...open].filter((id) => keep.has(id));
+  const dropped = [...open].filter((id) => !keep.has(id));
+  return {
+    ...model,
+    questions: model.questions.map((q) => {
+      if (!open.has(q.id)) return q;
+      return keep.has(q.id) ? { ...q, kept: true } : { ...q, status: 'DONE' as const, droppedAt: at, kept: false };
+    }),
+    wrapup: { at, keptQuestionIds: kept, topics: model.wrapup?.topics ?? [] },
+    log: [...model.log, { turn: model.turn, at, kind: 'finish' as const, payload: { kept, dropped } }],
+  };
+}
+
+/** RT-US-13. The topics for the next conversation, as suggested or after the person removed some. */
+export function setWrapupTopics(model: Model, topics: { title: string; why: string }[], at = new Date().toISOString()): Model {
+  const clean = topics.map((t) => ({ title: t.title.trim(), why: t.why.trim() })).filter((t) => t.title);
+  return {
+    ...model,
+    wrapup: { at: model.wrapup?.at || at, keptQuestionIds: model.wrapup?.keptQuestionIds ?? [], topics: clean },
+  };
+}
+
+/** Questions kept at Finish, still open. */
+export function keptQuestions(m: Model): Question[] {
+  return m.questions.filter((q) => q.kept && q.status === 'OPEN' && !q.answeredAt);
+}
+
+/** What the wrap-up call is given (RT-US-13). */
+export function wrapupPayload(m: Model) {
+  const conversation = conversationWindow(m);
+  const label = new Map(m.concepts.map((c) => [c.id, c.label]));
+  const confirmed = visibleConcepts(m).filter((c) => c.status === 'VALIDATED');
+  const ok = new Set(confirmed.map((c) => c.id));
+  return {
+    goal: m.goal,
+    conversation: conversation.lines,
+    omittedStatements: conversation.omitted,
+    concepts: confirmed.map((c) => ({ id: c.id, label: c.label, note: c.note, kind: c.kind })),
+    relationships: visibleRelationships(m)
+      .filter((r) => r.status === 'VALIDATED' && ok.has(r.from) && ok.has(r.to))
+      .map((r) => ({ from: label.get(r.from) ?? r.from, to: label.get(r.to) ?? r.to, label: r.label })),
+    keptQuestions: keptQuestions(m).map((q) => q.text),
+    answeredQuestions: answeredQuestions(m),
+    closedQuestions: closedQuestions(m),
+  };
 }
 
 /** The compact projection sent to the LLM. Never the whole model. */

@@ -1,6 +1,6 @@
 {
   "name": "enabler-context-builder-preload",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "scripts": {
     "predev": "[ -f .vercel/project.json ] && npm run env:pull --silent </dev/null || echo 'Vercel env not pulled, using the .env files already here. Run npm run env:link once.'",

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -9,7 +9,6 @@ import {
   Panel,
   ReactFlow,
   ReactFlowProvider,
-  useNodesInitialized,
   useReactFlow,
   useViewport,
   type Edge,
@@ -21,12 +20,13 @@ import '@xyflow/react/dist/style.css';
 
 import ConceptNode from './ConceptNode';
 import ConceptEdge from './ConceptEdge';
+import QuestionNode from './QuestionNode';
 import { useSession } from '@/lib/store';
-import { visibleConcepts, visibleRelationships } from '@/lib/reducer';
-import type { NodeSize } from '@/lib/layout';
+import { cardQuestions, parkedCountByAnchor, visibleConcepts, visibleRelationships } from '@/lib/reducer';
+import { KIND_DEFAULT_SIZE, type NodeSize } from '@/lib/layout';
 import { mapToPng } from '@/lib/snapshot';
 
-const nodeTypes = { concept: ConceptNode };
+const nodeTypes = { concept: ConceptNode, question: QuestionNode };
 const edgeTypes = { concept: ConceptEdge };
 
 /**
@@ -43,6 +43,15 @@ function BandDivider({ y }: { y: number }) {
     </div>
   );
 }
+
+/* RT-US-06. The question cards' band, as layout.ts places QUESTION and PROBLEM boxes. */
+const BAND_GAP = 90;
+const CARD_WIDTH = 260;
+const CARD_GAP = 36;
+const QUESTION_COLOR = '#7c3aed';
+const BANDED = new Set(['QUESTION', 'PROBLEM']);
+/** How long a concept found from the open questions panel stays highlighted. */
+const HIGHLIGHT_MS = 2000;
 
 const LAYOUT_MS = 400;
 /* Past this many nodes the tween costs more than it explains, so it is dropped. */
@@ -64,9 +73,31 @@ function Flow() {
   const layoutTo = useSession((s) => s.layoutTo);
   const registerCapture = useSession((s) => s.registerCapture);
   const exportPicture = useSession((s) => s.exportPicture);
-  const { getNodes, getNodesBounds, fitView } = useReactFlow();
+  const showLinks = useSession((s) => s.showLinks);
+  const focusConceptId = useSession((s) => s.focusConceptId);
+  const clearFocus = useSession((s) => s.clearFocus);
+  const { getNodes, getNodesBounds, fitView, getNode, setCenter, getZoom } = useReactFlow();
+  const [highlight, setHighlight] = useState('');
+  const highlightTimer = useRef<number | undefined>(undefined);
   const wrapper = useRef<HTMLDivElement>(null);
-  const nodesInitialized = useNodesInitialized();
+
+  /*
+   * Measured box sizes, kept here and handed back on every node object.
+   *
+   * This canvas is controlled. React Flow measures each box and reports the
+   * size as a "dimensions" change; a controlled flow has to carry it back on
+   * the node, or React Flow treats the next node object it is given (every
+   * model change makes new ones) as unmeasured: it hides the box until it is
+   * measured again, and nodesInitialized stays false. Until 27 Oct 2026 the
+   * sizes were dropped, so the layout effect below never passed its checks:
+   * the map was not re-laid out after a turn, and Tidy up ranked every box at
+   * its default size.
+   */
+  const [measured, setMeasured] = useState<Map<string, NodeSize>>(() => new Map());
+  const sizesKey = useMemo(
+    () => [...measured].map(([id, d]) => `${id}:${d.width}x${d.height}`).join(';'),
+    [measured]
+  );
 
   /** True once the user has panned or zoomed by hand. Stops auto-fit stealing the view. */
   const viewportMoved = useRef(false);
@@ -76,11 +107,22 @@ function Flow() {
   const concepts = visibleConcepts(model);
   const relationships = visibleRelationships(model);
 
-  const bandTop = useMemo(() => {
-    const banded = concepts.filter((c) => c.kind === 'QUESTION' || c.kind === 'PROBLEM');
-    return banded.length ? Math.min(...banded.map((c) => c.y)) : null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model]);
+  const cards = cardQuestions(model);
+  const waiting = parkedCountByAnchor(model);
+
+  /*
+   * RT-US-06. Question cards sit in the band under the map, left to right in
+   * the order they were asked, after any PROBLEM boxes already there. They
+   * are not concepts, so dagre never sees them; they follow the map instead.
+   */
+  const sizeOf = (id: string, kind: keyof typeof KIND_DEFAULT_SIZE) => measured.get(id) ?? KIND_DEFAULT_SIZE[kind];
+  const mapped = concepts.filter((c) => !BANDED.has(c.kind));
+  const banded = concepts.filter((c) => BANDED.has(c.kind));
+  const mapBottom = mapped.length ? Math.max(...mapped.map((c) => c.y + sizeOf(c.id, c.kind).height)) : 0;
+  const mapLeft = concepts.length ? Math.min(...concepts.map((c) => c.x)) : 0;
+  const bandY = banded.length ? Math.min(...banded.map((c) => c.y)) : mapped.length ? mapBottom + BAND_GAP : 0;
+  const cardsLeft = banded.length ? Math.max(...banded.map((c) => c.x + sizeOf(c.id, c.kind).width)) + CARD_GAP : mapLeft;
+  const bandTop = banded.length || cards.length ? bandY : null;
 
   /*
    * Topology only. Positions are deliberately left out: they change on every
@@ -96,17 +138,57 @@ function Flow() {
     [model]
   );
 
-  const nodes: Node[] = useMemo(
+  /*
+   * Cards change the canvas but never the layout, so they are tracked apart
+   * from the topology the layout effect watches.
+   */
+  const cardTopology = cards.map((q) => `${q.id}:${q.anchorId ?? ''}`).join(',');
+
+  /*
+   * Concept nodes are rebuilt only when the model or the highlight changes.
+   * They must not depend on the band position: that depends on measured
+   * sizes, and a new node object drops React Flow's measurement, which would
+   * hide the node and change the sizes again, round and round.
+   */
+  const conceptNodes: Node[] = useMemo(
     () =>
       concepts.map((c) => ({
         id: c.id,
         type: 'concept',
         position: { x: c.x, y: c.y },
-        data: { label: c.label, note: c.note, status: c.status, origin: c.origin, kind: c.kind },
+        className: highlight === c.id ? 'node-focus' : undefined,
+        measured: measured.get(c.id),
+        data: {
+          label: c.label,
+          note: c.note,
+          status: c.status,
+          origin: c.origin,
+          kind: c.kind,
+          parkedQuestions: waiting.get(c.id) ?? 0,
+        },
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [model]
+    [model, highlight, sizesKey]
   );
+
+  const cardNodes: Node[] = useMemo(
+    () => {
+      const label = new Map(concepts.map((c) => [c.id, c.label]));
+      return cards.map((q, i) => ({
+        id: q.id,
+        type: 'question',
+        position: { x: cardsLeft + i * (CARD_WIDTH + CARD_GAP), y: bandY },
+        draggable: false,
+        selectable: false,
+        measured: measured.get(q.id),
+        data: { questionId: q.id, text: q.text, why: q.why, about: (q.anchorId && label.get(q.anchorId)) || '' },
+      }));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cardTopology, model.questions, bandY, cardsLeft, sizesKey]
+  );
+
+  const nodes = useMemo(() => [...conceptNodes, ...cardNodes], [conceptNodes, cardNodes]);
 
   // Rebuilt on topology change only. Edge geometry comes from React Flow's own
   // node store, so these objects do not need to change while nodes are moving.
@@ -134,10 +216,49 @@ function Flow() {
     [topology]
   );
 
-  // Only drags are written back. Everything else the canvas wants to do is ignored.
+  // RT-US-06. A dashed line from the concept a question is about to its card.
+  // Not a Relationship: no label, no buttons, not in the file.
+  const connectors: Edge[] = useMemo(
+    () => {
+      const onMap = new Set(concepts.map((c) => c.id));
+      return cards
+        .filter((q) => q.anchorId && onMap.has(q.anchorId))
+        .map((q) => ({
+          id: `qa_${q.id}`,
+          source: q.anchorId!,
+          sourceHandle: 'sb',
+          target: q.id,
+          type: 'default',
+          selectable: false,
+          focusable: false,
+          style: { stroke: QUESTION_COLOR, strokeWidth: 1.4, strokeDasharray: '4 4', opacity: 0.7 },
+        }));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cardTopology, topology]
+  );
+
+  // RT-US-19. Links off hides them on screen only. Layout reads the model.
+  const shownEdges = useMemo(() => (showLinks ? [...edges, ...connectors] : connectors), [showLinks, edges, connectors]);
+
+  // Only drags of concepts are written back. Everything else the canvas wants to do is ignored.
+  const conceptIds = new Set(concepts.map((c) => c.id));
   const onNodesChange = (changes: NodeChange[]) => {
+    // Sizes first: keep every new measurement, so the next node objects carry it.
+    let next: Map<string, NodeSize> | null = null;
     for (const ch of changes) {
-      if (ch.type === 'position' && ch.dragging === false && ch.position) {
+      if (ch.type !== 'dimensions' || !ch.dimensions) continue;
+      const width = Math.round(ch.dimensions.width);
+      const height = Math.round(ch.dimensions.height);
+      const had = (next ?? measured).get(ch.id);
+      if (had && had.width === width && had.height === height) continue;
+      next = next ?? new Map(measured);
+      next.set(ch.id, { width, height });
+    }
+    if (next) setMeasured(next);
+
+    for (const ch of changes) {
+      if (ch.type === 'position' && ch.dragging === false && ch.position && conceptIds.has(ch.id)) {
         move(ch.id, ch.position.x, ch.position.y);
       }
     }
@@ -148,20 +269,24 @@ function Flow() {
     if (event) viewportMoved.current = true;
   }, []);
 
-  // Rendered nodes carry real measured dimensions; fall back to the CSS
-  // default (place.ts / layout.ts) for anything not painted yet.
+  /** Concept sizes for dagre. Question cards are not concepts; their sizes would only confuse it. */
+  const measuredSizes = useCallback((): Record<string, NodeSize> => {
+    const sizes: Record<string, NodeSize> = {};
+    for (const c of concepts) {
+      const d = measured.get(c.id);
+      if (d) sizes[c.id] = d;
+    }
+    return sizes;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sizesKey, topology]);
+
+  // Fall back to the CSS default (layout.ts) for anything not painted yet.
   const runLayout = useCallback(
     async (ms: number, fit: boolean) => {
-      const sizes: Record<string, NodeSize> = {};
-      for (const n of getNodes()) {
-        if (n.measured?.width && n.measured?.height) {
-          sizes[n.id] = { width: n.measured.width, height: n.measured.height };
-        }
-      }
-      await layoutTo(sizes, ms);
+      await layoutTo(measuredSizes(), ms);
       if (fit) fitView({ padding: 0.25, maxZoom: 0.85, duration: 320 });
     },
-    [getNodes, layoutTo, fitView]
+    [measuredSizes, layoutTo, fitView]
   );
 
   /*
@@ -176,15 +301,13 @@ function Flow() {
       laidOutFor.current = topology;
       return;
     }
-    if (!nodesInitialized) return;
-
-    const painted = getNodes();
-    if (painted.length !== concepts.length) return;
-    if (painted.some((n) => !n.measured?.width || !n.measured?.height)) return;
+    // Every concept box measured. Question cards are on the canvas too and
+    // are left out: counting them would mean this never passes.
+    if (Object.keys(measuredSizes()).length !== concepts.length) return;
 
     laidOutFor.current = topology;
     void runLayout(concepts.length > ANIMATION_LIMIT ? 0 : LAYOUT_MS, !viewportMoved.current);
-  }, [autoTidy, nodesInitialized, topology, concepts.length, getNodes, runLayout]);
+  }, [autoTidy, topology, concepts.length, measuredSizes, runLayout]);
 
   // RT-US-17. The header and other panels sit outside the React Flow provider,
   // so the canvas hands the store a way to draw the whole map as a PNG.
@@ -197,6 +320,30 @@ function Flow() {
     return () => registerCapture(null);
   }, [registerCapture, getNodes, getNodesBounds]);
 
+  /*
+   * RT-US-09. A click on a question's subject in the open questions panel
+   * brings that concept into view and highlights it for a moment.
+   */
+  useEffect(() => {
+    if (!focusConceptId) return;
+    const node = getNode(focusConceptId);
+    clearFocus();
+    if (!node) return;
+    const size = measured.get(focusConceptId);
+    const w = size?.width ?? 220;
+    const h = size?.height ?? 80;
+    viewportMoved.current = true;
+    void setCenter(node.position.x + w / 2, node.position.y + h / 2, { zoom: Math.max(getZoom(), 0.9), duration: 400 });
+    setHighlight(focusConceptId);
+    // A ref, not the effect's cleanup: clearFocus above re-runs this effect
+    // at once, and a cleanup would cancel the timer before it fires.
+    window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlight(''), HIGHLIGHT_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusConceptId, getNode, setCenter, getZoom, clearFocus]);
+
+  useEffect(() => () => window.clearTimeout(highlightTimer.current), []);
+
   const tidyUp = useCallback(() => {
     // An explicit Tidy up is also a request to see the whole thing again.
     viewportMoved.current = false;
@@ -208,7 +355,7 @@ function Flow() {
     <ReactFlow
       ref={wrapper}
       nodes={nodes}
-      edges={edges}
+      edges={shownEdges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}

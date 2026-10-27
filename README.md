@@ -115,8 +115,68 @@ questions to ask, and every question in the questions panel can be answered.
 Where: `components/AnswerField.tsx`, `GapBar.tsx`, `parkQuestion`,
 `unparkQuestion`, `laterQuestions`, `answerTarget` in `lib/reducer.ts`.
 
-Not done here: questions as their own records (Release 2, steps 2.1 to 2.3).
-Questions stay boxes and list items, so old files and runs load unchanged.
+Since 27 Oct the live session keeps its questions as records, drawn as cards
+(Release 2, below). Preload still uses question boxes and list items.
+
+---
+
+## Real-time, Releases 2 to 4 (27 Oct 2026)
+
+Story IDs refer to *CB Real-time Refinements v0.1*. Preload is unchanged: every
+new option is passed only by the live store, and the new prompt rules and
+schema fields are Real-time variants.
+
+### Release 2: one question
+
+| Story | What changed for the user | Where |
+|---|---|---|
+| RT-US-06 | A question is a **card** under the map, not a box in it. A dashed line runs from the concept it is about. Dagre never sees cards, so a question never pushes the map around. At most 5 cards; a new question past that waits in the panel | `QuestionNode.tsx`, `Canvas.tsx`, `applyPropose` option `questionsAsRecords`, `MAX_QUESTIONS_ON_MAP` |
+| RT-US-07 | **Answer** on a card is read against the map (the same answer call as before). The next proposals stay with what the question was about and what the answer added | `answerQuestion` in `lib/store.ts`, `applyPropose` option `focusIds`, FOCUS block in `proposeUser` |
+| RT-US-08 | An answer typed in the main input closes the question it clearly answers. The extract call sees the open questions and names the ones answered, by id only | `ExtractPatchRT.answersQuestionIds`, `EXTRACT_REALTIME_RULES`, `applyExtract` |
+| RT-US-09 | The right panel is **Open questions (n)**: every question put off with Later or waiting for room on the map. Each can be answered, sent **Back to map** or dismissed. The subject is a link that brings it into view and highlights it | `OpenQuestionsPanel.tsx` (was `GapBar.tsx`), `focusConcept` |
+| RT-US-10 | A concept with questions waiting in the panel shows **★n** | `parkedCountByAnchor`, `ConceptNode` `parkedQuestions` |
+| RT-US-11 | Confirm and Reject stay on guesses only. A session restored or opened from before Release 2 has its question boxes turned into cards (same ids, answers kept) | `migrateQuestionConcepts`, run on Restore and Open only |
+
+Question states are read from markers, not stored in `status`: OPEN, PARKED
+(`parkedAt`), ANSWERED (`answeredAt`), DISMISSED (`dismissedAt`), DROPPED
+(`droppedAt`). `status` stays `OPEN` or `DONE`, because Preload counts
+`status === 'OPEN'` and files from 26 Oct already carry the markers. See
+`questionState` in `lib/types.ts`.
+
+### Release 3: Finish
+
+| Story | What changed for the user | Where |
+|---|---|---|
+| RT-US-12 | **Finish** in the header (from turn 1) opens three steps. Review lists every open question, unticked. Ticked ones are kept for next time; the rest are dropped and never asked again. **Back to session** closes it at any step | `FinishPanel.tsx`, `applyFinishReview`, `Model.wrapup` |
+| RT-US-13 | Up to 5 topics for the next conversation, from the goal, the confirmed map and the kept questions. Each can be removed. If the call fails: "No topics this time" | `app/api/wrapup`, `WRAPUP_SYSTEM`, `WrapupPatch`, `setWrapupTopics` |
+| RT-US-14 | **Download report**: one HTML file (goal, what we covered, open questions, topics, the map as a picture) that prints to A4. "What we covered" is built from the data, not by the AI, and nothing rejected appears in it | `lib/report.ts` |
+| RT-US-18 | The start screen shows how a session goes in four steps, and what the colours mean | `StartSteps` in `app/page.tsx` |
+
+### Release 4: options
+
+| Story | What changed | Where |
+|---|---|---|
+| RT-US-19 | **Links** in the header hides the links on screen. Boxes stay where they are; the file keeps every link | `showLinks` |
+| RT-US-05 | Models that refuse a forced tool (Opus 5.5, Sonnet 5.5, Fable, Mythos) are asked through structured outputs (`output_config.format`) instead. `ANTHROPIC_OUTPUT_MODE=json` does the same for any model | `outputModeFor`, `callAnthropicJson` in `lib/llm.ts` |
+
+To try the stronger model, set `PROPOSE_MODEL=claude-opus-5-5` in the Vercel
+Preview environment, together with `ANTHROPIC_API_KEY` (Preview has none yet).
+
+### Fixed on the way: the map was not laid out after a turn
+
+The live canvas is a controlled React Flow and wrote back only drags. React
+Flow reports each box's size as a change, and a controlled canvas has to hand
+it back on the node. Without it, every model change made unmeasured nodes:
+boxes flickered hidden until measured again, `nodesInitialized` stayed false,
+and the layout effect never passed its checks. So the "layout after every
+turn" decision of 18 Aug was not running, and Tidy up ranked every box at its
+default size. `Canvas.tsx` now keeps the sizes and passes them back.
+
+Also: the OpenAI path now treats `finish_reason: length` as a cut-off answer
+and retries it bigger, as the Anthropic path does.
+
+`PROMPT_VERSION` is `p7-2026-10-27`. Checks: `smoke` has 66 new checks (176 in
+all); `smoke:preload` and `smoke:store` are unchanged and pass.
 
 ---
 
@@ -273,6 +333,8 @@ this machine only:
 |---|---|
 | `LLM_PROVIDER` | `anthropic` or `openai` |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | one of them, server side only |
+| `ANTHROPIC_OUTPUT_MODE` | `tool` (default) or `json`. Opus 5.5, Sonnet 5.5, Fable and Mythos always use `json` |
+| `NEXT_PUBLIC_QUESTION_CAP` | new questions per live turn, default 2 |
 | `EXTRACT_MODEL` | small and fast. Stage 1 runs it once per section |
 | `PROPOSE_MODEL` | stronger |
 | `MERGE_MODEL` | defaults to `PROPOSE_MODEL`. The merge is where quality shows |

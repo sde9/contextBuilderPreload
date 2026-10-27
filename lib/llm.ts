@@ -6,8 +6,10 @@ import type { Usage } from './types';
  * Fewer dependencies, and the request shape stays visible when something goes
  * wrong at 22:00 the night before a session.
  *
- * Both paths use provider-enforced structured output:
- *   Anthropic -> tool use with a forced tool_choice
+ * Both providers use provider-enforced structured output:
+ *   Anthropic -> tool use with a forced tool_choice, or, for the models that
+ *                refuse a forced tool (Opus 5.5, Sonnet 5.5, Fable, Mythos),
+ *                output_config.format json_schema (RT-US-05)
  *   OpenAI    -> response_format json_schema, strict
  *
  * Provider guarantees are good but not perfect, so every response is still
@@ -38,9 +40,26 @@ type CallArgs = {
   temperature?: number;
 };
 
+export type OutputMode = 'tool' | 'json';
+
+/** Models that reject a forced tool_choice and need structured outputs instead. */
+const JSON_ONLY_MODELS = /(opus|sonnet)-5-5|fable|mythos/i;
+
+/**
+ * How to ask an Anthropic model for structured output. ANTHROPIC_OUTPUT_MODE
+ * sets it for every model (tool or json, default tool); a model that refuses
+ * a forced tool always gets json, whatever the setting, because tool would
+ * fail every call.
+ */
+export function outputModeFor(model: string, setting = process.env.ANTHROPIC_OUTPUT_MODE): OutputMode {
+  if (JSON_ONLY_MODELS.test(model)) return 'json';
+  return setting === 'json' ? 'json' : 'tool';
+}
+
 async function callAnthropic(a: CallArgs): Promise<Answer> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new LlmError('ANTHROPIC_API_KEY is not set. Run npm run env:pull to fetch it from Vercel.');
+  if (outputModeFor(a.model) === 'json') return callAnthropicJson(a, key);
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -82,6 +101,48 @@ async function callAnthropic(a: CallArgs): Promise<Answer> {
   return { value: block.input, usage };
 }
 
+/*
+ * RT-US-05. Structured outputs: the schema goes in output_config.format, with
+ * no tools and no tool_choice, and the answer is JSON in the first text
+ * block. The Zod check and the one retry in structured() still apply.
+ */
+async function callAnthropicJson(a: CallArgs, key: string): Promise<Answer> {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: a.model,
+      max_tokens: a.maxTokens ?? 2000,
+      ...(a.temperature !== undefined ? { temperature: a.temperature } : {}),
+      system: a.system,
+      output_config: { format: { type: 'json_schema', schema: a.jsonSchema } },
+      messages: [{ role: 'user', content: a.user }],
+    }),
+  });
+
+  if (!res.ok) throw new LlmError(`Anthropic ${res.status}`, await res.text());
+
+  const body = (await res.json()) as {
+    content?: { type: string; text?: string }[];
+    usage?: { input_tokens?: number; output_tokens?: number };
+    stop_reason?: string;
+  };
+  const usage = body.usage ? { input: body.usage.input_tokens ?? 0, output: body.usage.output_tokens ?? 0 } : null;
+  if (body.stop_reason === 'max_tokens') return { value: null, usage, truncated: true };
+  if (body.stop_reason === 'refusal') throw new LlmError('The model declined to answer this request.', body);
+  const text = body.content?.find((c) => c.type === 'text')?.text;
+  if (!text) throw new LlmError('Anthropic returned no text block', body);
+  try {
+    return { value: JSON.parse(text), usage };
+  } catch {
+    throw new LlmError('Anthropic returned unparseable JSON', text);
+  }
+}
+
 async function callOpenAI(a: CallArgs): Promise<Answer> {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new LlmError('OPENAI_API_KEY is not set. Copy .env.local.example to .env.local.');
@@ -105,12 +166,14 @@ async function callOpenAI(a: CallArgs): Promise<Answer> {
   if (!res.ok) throw new LlmError(`OpenAI ${res.status}`, await res.text());
 
   const body = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: { message?: { content?: string }; finish_reason?: string }[];
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
+  const usage = body.usage ? { input: body.usage.prompt_tokens ?? 0, output: body.usage.completion_tokens ?? 0 } : null;
+  // The same size check as the Anthropic path: a cut-off answer is retried bigger, not fed schema errors.
+  if (body.choices?.[0]?.finish_reason === 'length') return { value: null, usage, truncated: true };
   const text = body.choices?.[0]?.message?.content;
   if (!text) throw new LlmError('OpenAI returned no content', body);
-  const usage = body.usage ? { input: body.usage.prompt_tokens ?? 0, output: body.usage.completion_tokens ?? 0 } : null;
   try {
     return { value: JSON.parse(text), usage };
   } catch {
