@@ -105,9 +105,18 @@ The answer call uses `ANSWER_MODEL`, then `EXTRACT_MODEL`, then Haiku 4.5.
 Each answer is logged with its model, time and tokens. `PROMPT_VERSION` is
 `p6-2026-10-26`.
 
-Not done here: questions as their own records (Release 2, steps 2.1 to 2.3),
-**Later** with a parked list, and answering list questions in the gap bar.
-This change keeps questions as boxes, so old files and runs load unchanged.
+**27 Oct: the right panel and Later.** Every question, on the map or in the
+right panel, has the same answer field, plus **Later** and **Dismiss**. Later
+takes a box off the map, or a list question out of the open list, into a
+**Later** section of the panel. From there it can be answered or sent back.
+A Later question stays open for the AI, so it is not asked again, and the
+open-list cap never retires it. In Preload, Later on a box keeps it in the
+questions to ask, and every question in the questions panel can be answered.
+Where: `components/AnswerField.tsx`, `GapBar.tsx`, `parkQuestion`,
+`unparkQuestion`, `laterQuestions`, `answerTarget` in `lib/reducer.ts`.
+
+Not done here: questions as their own records (Release 2, steps 2.1 to 2.3).
+Questions stay boxes and list items, so old files and runs load unchanged.
 
 ---
 
