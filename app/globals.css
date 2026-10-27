@@ -192,15 +192,19 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 /* A question takes an answer, not a yes or no. */
 .node-answer { flex-direction: column; gap: 6px; cursor: default; }
-.node-answer-input {
+.answer-field { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.answer-input {
   width: 100%; min-height: 44px; resize: vertical; box-sizing: border-box;
   font: inherit; font-size: 12.5px; line-height: 1.35; padding: 6px 8px;
   border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: inherit;
 }
-.node-answer-input:focus { outline: 2px solid var(--question); outline-offset: 0; border-color: var(--question); }
-.node-answer-input:disabled { background: #f8fafc; color: var(--muted); }
-.node-answer-row { display: flex; gap: 6px; }
-.node-answer-note { font-size: 11px; line-height: 1.35; color: var(--muted); }
+.answer-input:focus { outline: 2px solid var(--question); outline-offset: 0; border-color: var(--question); }
+.answer-input:disabled { background: #f8fafc; color: var(--muted); }
+.answer-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.answer-row button { padding: 3px 9px; font-size: 11.5px; border-radius: 6px; }
+.answer-note { font-size: 11px; line-height: 1.35; color: var(--muted); }
+.btn-later { border-color: var(--question); color: var(--question); background: #fff; }
+.btn-later:hover:not(:disabled) { background: var(--question); color: #fff; }
 .btn-yes { border-color: var(--green); color: var(--green); background: #fff; }
 .btn-yes:hover:not(:disabled) { background: var(--green); color: #fff; }
 .btn-no { border-color: #cbd5e1; color: var(--muted); background: #fff; }
@@ -267,6 +271,20 @@ button:disabled { opacity: 0.45; cursor: default; }
 }
 .gap-question { font-size: 13.5px; line-height: 1.45; }
 .gap-dismiss { margin-top: 8px; padding: 2px 8px; font-size: 11px; color: var(--muted); }
+.clarify-item .answer-field { margin-top: 8px; }
+.answer-compact .answer-input { min-height: 38px; font-size: 12.5px; }
+
+/* Questions put off for later: quieter, purple like the question bubble. */
+.later { margin-top: 16px; }
+.clarify-panel > .later:first-child { margin-top: 0; }
+.later-header {
+  display: flex; justify-content: space-between; align-items: center; width: 100%;
+  padding: 4px 0; margin-bottom: 8px; border: 0; background: none; cursor: pointer;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+  color: var(--question);
+}
+.later-item { background: #fff; border-left-color: var(--question); }
+.later-about { font-weight: 600; color: var(--ink, inherit); }
 
 /* ---------------------------------------------------------------- bottom */
 
@@ -646,6 +664,7 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
 .q-anchor { border: 0; background: none; padding: 0; color: #2563eb; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
 .q-actions { display: flex; gap: 6px; margin-top: 6px; }
 .q-actions button { font-size: 11.5px; padding: 3px 9px; }
+.q-list .answer-field { margin-top: 6px; }
 .q-add { display: flex; gap: 6px; margin-top: 12px; }
 .q-add input { flex: 1; min-width: 0; font: inherit; font-size: 12.5px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
 .q-add button { font-size: 12px; }

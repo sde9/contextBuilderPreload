@@ -116,14 +116,17 @@ export type Concept = {
   answer?: string;
   answeredAt?: string;
   answerStatementId?: string;
+  /** A QUESTION box put off for later. Off the map, in the Later list, until answered or brought back. */
+  parkedAt?: string;
 };
 
 /**
- * On the map: not rejected, not folded into another concept by a merge, and
- * not a question that has been answered. Every mode draws from this one test.
+ * On the map: not rejected, not folded into another concept by a merge, not
+ * a question that has been answered, and not one put off for later. Every
+ * mode draws from this one test.
  */
 export function onMap(c: Concept): boolean {
-  return c.status !== 'REJECTED' && !c.absorbedInto && !c.answeredAt;
+  return c.status !== 'REJECTED' && !c.absorbedInto && !c.answeredAt && !c.parkedAt;
 }
 
 /** One side of a disagreement between documents. */
@@ -190,8 +193,12 @@ export type Question = {
   savedAt?: string;
   /** Preload. The concept the question is about, "" or absent when none. */
   anchorId?: string;
-  /** What the person said when they answered it on the map. */
+  /** What the person said when they answered it. */
   answer?: string;
+  answeredAt?: string;
+  answerStatementId?: string;
+  /** Put off for later. Still OPEN, so the AI does not ask it again, but out of the main list. */
+  parkedAt?: string;
 };
 
 /**

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { questionsMarkdown, usePreload } from '@/lib/preloadStore';
 import { norm } from '@/lib/guards';
 import { onMap as isOnMap } from '@/lib/types';
+import AnswerField from '../AnswerField';
 
 /*
  * The questions to take into the interview.
@@ -25,6 +26,8 @@ export default function QuestionsPanel() {
   const fromConcept = usePreload((s) => s.saveConceptQuestion);
   const rejectConcept = usePreload((s) => s.reject);
   const download = usePreload((s) => s.downloadQuestions);
+  const answer = usePreload((s) => s.answer);
+  const busy = usePreload((s) => Boolean(s.answering));
   const [draft, setDraft] = useState('');
   const [copied, setCopied] = useState(false);
 
@@ -37,7 +40,10 @@ export default function QuestionsPanel() {
   const onMap = model.concepts.filter(
     (c) => c.kind === 'QUESTION' && isOnMap(c) && !savedTexts.has(norm(c.label))
   );
-  const answered = model.concepts.filter((c) => c.kind === 'QUESTION' && c.answeredAt && c.status !== 'REJECTED');
+  const answered = [
+    ...model.concepts.filter((c) => c.kind === 'QUESTION' && c.answeredAt && c.status !== 'REJECTED').map((c) => ({ id: c.id, text: c.label, answer: c.answer })),
+    ...model.questions.filter((q) => q.answeredAt).map((q) => ({ id: q.id, text: q.text, answer: q.answer })),
+  ].filter((a, i, all) => all.findIndex((b) => norm(b.text) === norm(a.text)) === i);
   const anchorOf = (conceptId: string) => {
     const r = model.relationships.find((x) => x.status !== 'REJECTED' && (x.from === conceptId || x.to === conceptId));
     return r ? (r.from === conceptId ? r.to : r.from) : '';
@@ -85,9 +91,9 @@ export default function QuestionsPanel() {
                 {q.why && <span>{q.why}</span>}
               </div>
             ) : null}
-            <div className="q-actions">
+            <AnswerField onAnswer={(text) => answer(q.id, text)} busy={busy} compact>
               <button onClick={() => void unsave(q.id)}>Remove</button>
-            </div>
+            </AnswerField>
           </li>
         ))}
       </ol>
@@ -123,14 +129,14 @@ export default function QuestionsPanel() {
           <li key={q.id}>
             <div className="q-text">{q.text}</div>
             {q.why && <div className="q-meta">{q.why}</div>}
-            <div className="q-actions">
-              <button className="btn-yes" onClick={() => void save(q.id)}>
+            <AnswerField onAnswer={(text) => answer(q.id, text)} busy={busy} compact>
+              <button className="btn-later" onClick={() => void save(q.id)} title="Keep it in the questions to ask">
                 Save
               </button>
               <button className="btn-no" onClick={() => void dismiss(q.id)}>
                 Dismiss
               </button>
-            </div>
+            </AnswerField>
           </li>
         ))}
         {onMap.map((c) => {
@@ -144,14 +150,14 @@ export default function QuestionsPanel() {
                 </button>
                 {c.note && <span>{c.note}</span>}
               </div>
-              <div className="q-actions">
-                <button className="btn-yes" onClick={() => void fromConcept(c.id)}>
+              <AnswerField onAnswer={(text) => answer(c.id, text)} busy={busy} compact>
+                <button className="btn-later" onClick={() => void fromConcept(c.id)} title="Keep it in the questions to ask">
                   Save
                 </button>
                 <button className="btn-no" onClick={() => void rejectConcept(c.id)}>
                   Dismiss
                 </button>
-              </div>
+              </AnswerField>
             </li>
           );
         })}
@@ -161,10 +167,10 @@ export default function QuestionsPanel() {
         <>
           <h2 className="q-title q-title-gap">Answered on the map ({answered.length})</h2>
           <ul className="q-list">
-            {answered.map((c) => (
-              <li key={c.id}>
-                <div className="q-text">{c.label}</div>
-                <div className="q-meta">{c.answer}</div>
+            {answered.map((a) => (
+              <li key={a.id}>
+                <div className="q-text">{a.text}</div>
+                <div className="q-meta">{a.answer}</div>
               </li>
             ))}
           </ul>

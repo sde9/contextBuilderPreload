@@ -19,6 +19,11 @@
 import { emptyModel, normaliseModel, resolveKind } from '../lib/types';
 import { saidThisTurn } from '../lib/guards';
 import {
+  activeQuestions,
+  dismissAny,
+  laterQuestions,
+  parkQuestion,
+  unparkQuestion,
   answerPayload,
   answeredQuestions,
   applyAnswer,
@@ -666,6 +671,82 @@ check('a concept with a valid kind keeps it', resolveKind({ kind: 'RULE' }) === 
 
   const gone = applyAnswer(b, q.id, 'again', { answersQuestion: true, concepts: [], relationships: [], updates: [], confirms: [], rejects: [] });
   check('a question already answered cannot be answered again', gone.model === b);
+}
+
+
+// ---- later, and answers to list questions -----------------------------------
+{
+  let l = emptyModel('s_later');
+  ({ model: l } = applyExtract(
+    l,
+    { concepts: [{ tempId: 'n1', label: 'Concert', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }], relationships: [] },
+    'The concert is on 12 December.'
+  ));
+  const concert = l.concepts[0];
+  ({ model: l } = applyPropose(l, {
+    concepts: [{ tempId: 'p1', label: 'Who plays?', why: 'Musicians left', attachTo: concert.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false }],
+    relationships: [],
+    questions: [
+      { text: 'How many tickets will you sell?', usefulness: 4 },
+      { text: 'Who runs the fair?', usefulness: 3 },
+    ],
+  }));
+  const box = l.concepts.find((c) => c.kind === 'QUESTION')!;
+  const tickets = l.questions.find((q) => q.text.startsWith('How many'))!;
+  const fair = l.questions.find((q) => q.text.startsWith('Who runs'))!;
+
+  l = parkQuestion(l, tickets.id);
+  l = parkQuestion(l, box.id);
+  check('a list question put off leaves the open list', !activeQuestions(l).some((q) => q.id === tickets.id));
+  check('a box put off leaves the map', !visibleConcepts(l).some((c) => c.id === box.id));
+  check('its link leaves the map with it', !visibleRelationships(l).some((r) => r.to === box.id || r.from === box.id));
+  check('both are in the Later list', laterQuestions(l).length === 2);
+  check('the Later box still knows what it is about', laterQuestions(l).find((q) => q.id === box.id)?.anchorId === concert.id);
+  check('a question put off is still sent to the AI as open, so it is not asked again', contextPayload(l).openQuestions.includes(tickets.text));
+
+  // The open-list cap never retires a question the person kept for later.
+  let full = l;
+  ({ model: full } = applyPropose(full, {
+    concepts: [],
+    relationships: [],
+    questions: Array.from({ length: 12 }, (_, i) => ({ text: `Filler question ${i}?`, usefulness: 5 })),
+  }));
+  check('the cap never retires a Later question', full.questions.find((q) => q.id === tickets.id)?.status === 'OPEN');
+
+  const back = unparkQuestion(l, box.id);
+  check('Back to map puts the box back', visibleConcepts(back).some((c) => c.id === box.id));
+
+  const r = applyAnswer(l, tickets.id, 'About 200 tickets at $15.', {
+    answersQuestion: true,
+    concepts: [{ tempId: 'a1', label: 'Tickets', note: 'about 200 at $15', matchesExistingId: '', kind: 'ATTRIBUTE', belongsTo: concert.id }],
+    relationships: [],
+    updates: [],
+    confirms: [],
+    rejects: [],
+  });
+  check('a Later list question can be answered', r.answered && r.model.questions.find((q) => q.id === tickets.id)?.status === 'DONE');
+  check('its answer is kept and it leaves Later', r.model.questions.find((q) => q.id === tickets.id)?.answer === 'About 200 tickets at $15.' && !laterQuestions(r.model).some((q) => q.id === tickets.id));
+  check('what it says lands on the map', visibleConcepts(r.model).some((c) => c.label === 'Tickets' && c.belongsTo === concert.id));
+  check('the AI hears the list answer', contextPayload(r.model).answeredQuestions.some((a) => a.text === tickets.text));
+
+  const rb = applyAnswer(l, box.id, 'Sam and Lee will play.', {
+    answersQuestion: true,
+    concepts: [{ tempId: 'a1', label: 'Sam and Lee', note: '', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' }],
+    relationships: [],
+    updates: [],
+    confirms: [],
+    rejects: [],
+  });
+  check('a box put off can be answered from the Later list', rb.answered && !laterQuestions(rb.model).some((q) => q.id === box.id));
+  check('and its answer is tied to what it was about', rb.model.relationships.some((x) => x.from === concert.id && x.status === 'VALIDATED' && rb.model.concepts.find((c) => c.id === x.to)?.label === 'Sam and Lee'));
+
+  const open = applyAnswer(l, fair.id, 'The PTA runs it.', { answersQuestion: true, concepts: [], relationships: [], updates: [], confirms: [], rejects: [] });
+  check('an open list question can be answered too', open.model.questions.find((q) => q.id === fair.id)?.status === 'DONE');
+
+  const gone = dismissAny(l, box.id);
+  check('Dismiss on a Later box closes it for good', !laterQuestions(gone).some((q) => q.id === box.id) && closedQuestions(gone).includes(box.label));
+  const goneList = dismissAny(l, tickets.id);
+  check('Dismiss on a Later list question closes it for good', !laterQuestions(goneList).some((q) => q.id === tickets.id) && closedQuestions(goneList).includes(tickets.text));
 }
 
 // ---- call meta ---------------------------------------------------------------

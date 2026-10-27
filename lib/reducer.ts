@@ -28,6 +28,8 @@ function visible(c: Concept | Relationship): boolean {
   // An answered question has done its job. What the answer said is on the
   // map in its own boxes; the question stays in the file, off the map.
   if ('answeredAt' in c && c.answeredAt) return false;
+  // Put off for later: in the Later list, not on the map.
+  if ('parkedAt' in c && c.parkedAt) return false;
   return true;
 }
 
@@ -523,9 +525,10 @@ function mergeQuestions(current: Question[], incoming: QuestionIn[], turn: numbe
   }
 
   // Keep the open list short enough that the count stays meaningful.
-  const open = out.filter((q) => q.status === 'OPEN').sort((a, b) => b.usefulness - a.usefulness);
+  // A question the person put off for later is theirs to keep: never retired.
+  const open = out.filter((q) => q.status === 'OPEN' && !q.parkedAt).sort((a, b) => b.usefulness - a.usefulness);
   const keep = new Set(open.slice(0, MAX_OPEN_QUESTIONS).map((q) => q.id));
-  return out.map((q) => (q.status === 'OPEN' && !keep.has(q.id) ? { ...q, status: 'DONE' as const } : q));
+  return out.map((q) => (q.status === 'OPEN' && !q.parkedAt && !keep.has(q.id) ? { ...q, status: 'DONE' as const } : q));
 }
 
 // ------------------------------------------------------------------ user actions
@@ -709,7 +712,7 @@ export function conversationWindow(m: Model, limit = CONVERSATION_CHAR_LIMIT): {
   let used = 0;
   for (let i = m.statements.length - 1; i >= 0; i--) {
     const s = m.statements[i];
-    const asked = s.questionId ? m.concepts.find((c) => c.id === s.questionId)?.label : '';
+    const asked = s.questionId ? questionText(m, s.questionId) : '';
     const line = asked ? `T${s.turn} (answer to "${asked}"): ${s.text}` : `T${s.turn}: ${s.text}`;
     if (used + line.length > limit && lines.length > 0) break;
     lines.push(line);
@@ -731,9 +734,64 @@ export function closedQuestions(m: Model): string[] {
 
 /** Every question the person answered on the map, with what they said. */
 export function answeredQuestions(m: Model): { text: string; answer: string }[] {
-  return m.concepts
-    .filter((c) => c.kind === 'QUESTION' && c.answeredAt)
-    .map((c) => ({ text: c.label, answer: c.answer ?? '' }));
+  return [
+    ...m.concepts.filter((c) => c.kind === 'QUESTION' && c.answeredAt).map((c) => ({ text: c.label, answer: c.answer ?? '' })),
+    ...m.questions.filter((q) => q.answeredAt).map((q) => ({ text: q.text, answer: q.answer ?? '' })),
+  ];
+}
+
+/** The words of a question, whether it is a box on the map or an item in the list. */
+export function questionText(m: Model, id: string): string {
+  return m.concepts.find((c) => c.id === id)?.label ?? m.questions.find((q) => q.id === id)?.text ?? '';
+}
+
+/** Open list questions that are not put off for later, most useful first. */
+export const activeQuestions = (m: Model) => openQuestions(m).filter((q) => !q.parkedAt);
+
+/** Everything put off for later: list questions and boxes taken off the map. */
+export function laterQuestions(m: Model): { id: string; text: string; why: string; anchorId: string; box: boolean; at: string }[] {
+  const boxes = m.concepts
+    .filter((c) => c.kind === 'QUESTION' && c.parkedAt && !c.answeredAt && c.status !== 'REJECTED' && !c.absorbedInto)
+    .map((c) => ({ id: c.id, text: c.label, why: c.note, anchorId: questionAnchor(m, c.id)?.id ?? '', box: true, at: c.parkedAt! }));
+  const listed = m.questions
+    .filter((q) => q.status === 'OPEN' && q.parkedAt)
+    .map((q) => ({ id: q.id, text: q.text, why: q.why, anchorId: q.anchorId ?? '', box: false, at: q.parkedAt! }));
+  return [...boxes, ...listed].sort((a, b) => b.at.localeCompare(a.at));
+}
+
+/** Put a question off for later. A box leaves the map; a list item leaves the main list. */
+export function parkQuestion(model: Model, id: string, at = new Date().toISOString()): Model {
+  const box = model.concepts.find((c) => c.id === id && c.kind === 'QUESTION');
+  const item = model.questions.find((q) => q.id === id && q.status === 'OPEN');
+  if (!box && !item) return model;
+  return {
+    ...model,
+    concepts: box ? model.concepts.map((c) => (c.id === id ? { ...c, parkedAt: at } : c)) : model.concepts,
+    questions: item ? model.questions.map((q) => (q.id === id ? { ...q, parkedAt: at } : q)) : model.questions,
+    log: [...model.log, { turn: model.turn, at, kind: 'question' as const, payload: { action: 'later', questionId: id } }],
+  };
+}
+
+/** Bring a question back: a box returns to the map, a list item to the main list. */
+export function unparkQuestion(model: Model, id: string, at = new Date().toISOString()): Model {
+  const box = model.concepts.some((c) => c.id === id && c.parkedAt);
+  const item = model.questions.some((q) => q.id === id && q.parkedAt);
+  if (!box && !item) return model;
+  return {
+    ...model,
+    concepts: box ? model.concepts.map((c) => (c.id === id ? { ...c, parkedAt: '' } : c)) : model.concepts,
+    questions: item ? model.questions.map((q) => (q.id === id ? { ...q, parkedAt: '' } : q)) : model.questions,
+    log: [...model.log, { turn: model.turn, at, kind: 'question' as const, payload: { action: 'back', questionId: id } }],
+  };
+}
+
+/**
+ * Dismiss any question: a list item is closed as before, a box (on the map
+ * or put off for later) is rejected, which the AI also treats as closed.
+ */
+export function dismissAny(model: Model, id: string): Model {
+  if (model.questions.some((q) => q.id === id)) return dismissQuestion(model, id);
+  return rejectConcept(model, id);
 }
 
 /** The compact projection sent to the LLM. Never the whole model. */
@@ -858,20 +916,41 @@ export function questionAnchor(m: Model, questionId: string): Concept | undefine
   return ok.get(link.from === questionId ? link.to : link.from);
 }
 
-/** What the answer call is given. Null when the box is gone or is not a question. */
+/**
+ * The question being answered: a QUESTION box (on the map or put off for
+ * later), or an open item in the question list. Null when it is gone,
+ * already answered, or not a question.
+ */
+type AnswerTarget =
+  | { kind: 'box'; id: string; text: string; why: string; anchor: Concept | undefined }
+  | { kind: 'list'; id: string; text: string; why: string; anchor: Concept | undefined };
+
+function answerTarget(m: Model, id: string): AnswerTarget | null {
+  const c = m.concepts.find((x) => x.id === id);
+  if (c) {
+    if (c.kind !== 'QUESTION' || c.status === 'REJECTED' || c.absorbedInto || c.answeredAt) return null;
+    return { kind: 'box', id, text: c.label, why: c.note, anchor: questionAnchor(m, id) };
+  }
+  const q = m.questions.find((x) => x.id === id);
+  if (!q || q.status !== 'OPEN' || q.answeredAt) return null;
+  const anchor = q.anchorId ? m.concepts.find((x) => x.id === q.anchorId && visible(x)) : undefined;
+  return { kind: 'list', id, text: q.text, why: q.why, anchor };
+}
+
+/** What the answer call is given. Null when the question is gone or already answered. */
 export function answerPayload(m: Model, questionId: string, answer: string): AnswerInput | null {
-  const q = m.concepts.find((c) => c.id === questionId && visible(c) && c.kind === 'QUESTION');
-  if (!q) return null;
-  const anchor = questionAnchor(m, questionId);
+  const t = answerTarget(m, questionId);
+  if (!t) return null;
+  const anchor = t.anchor;
   return {
     goal: m.goal,
-    question: { id: q.id, text: q.label, why: q.note },
+    question: { id: t.id, text: t.text, why: t.why },
     anchor: anchor ? { id: anchor.id, label: anchor.label, note: anchor.note } : null,
     concepts: visibleConcepts(m)
-      .filter((c) => c.id !== q.id)
+      .filter((c) => c.id !== t.id)
       .map((c) => ({ id: c.id, label: c.label, note: c.note, status: c.status, kind: c.kind })),
     relationships: visibleRelationships(m)
-      .filter((r) => r.from !== q.id && r.to !== q.id)
+      .filter((r) => r.from !== t.id && r.to !== t.id)
       .map((r) => ({ from: r.from, to: r.to, label: r.label })),
     answer: answer.trim(),
   };
@@ -890,11 +969,11 @@ export type AnswerResult = {
 
 export function applyAnswer(model: Model, questionId: string, answer: string, patch: AnswerPatch): AnswerResult {
   const text = answer.trim();
-  const question = model.concepts.find((c) => c.id === questionId && visible(c) && c.kind === 'QUESTION');
+  const target = answerTarget(model, questionId);
   const none: AnswerResult = { model, blocked: noBlocks(), answered: false, added: 0, changed: 0, confirmed: 0, rejected: 0 };
-  if (!question || !text) return none;
+  if (!target || !text) return none;
 
-  const anchor = questionAnchor(model, questionId);
+  const anchor = target.anchor;
   const at = new Date().toISOString();
   const before = new Set(model.concepts.map((c) => c.id));
 
@@ -999,14 +1078,15 @@ export function applyAnswer(model: Model, questionId: string, answer: string, pa
   // settled: it stays where it is, and what was said is still on the map.
   const answered = patch.answersQuestion;
   if (answered) {
+    const done = { answer: text, answeredAt: at, answerStatementId: statementId, parkedAt: '' };
     m = {
       ...m,
       concepts: m.concepts.map((c) =>
-        c.id === questionId ? { ...c, answer: text, answeredAt: at, answerStatementId: statementId } : c
+        c.id === questionId || (c.kind === 'QUESTION' && !c.answeredAt && norm(c.label) === norm(target.text)) ? { ...c, ...done } : c
       ),
-      // The same question kept in the list of questions to ask is done too.
+      // The same question in the list, or kept to ask, is done too.
       questions: m.questions.map((q) =>
-        q.status === 'OPEN' && norm(q.text) === norm(question.label) ? { ...q, status: 'DONE' as const, answer: text } : q
+        q.id === questionId || (q.status === 'OPEN' && norm(q.text) === norm(target.text)) ? { ...q, status: 'DONE' as const, ...done } : q
       ),
     };
   }
@@ -1025,7 +1105,7 @@ export function applyAnswer(model: Model, questionId: string, answer: string, pa
         turn,
         at,
         kind: 'answer' as const,
-        payload: { questionId, question: question.label, answer: text, answered, patch, changes, ...result },
+        payload: { questionId, question: target.text, answer: text, answered, patch, changes, ...result },
         blocked,
       },
     ],

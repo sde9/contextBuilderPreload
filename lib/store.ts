@@ -12,7 +12,9 @@ import {
   confirmConcept,
   confirmRelationship,
   contextPayload,
-  dismissQuestion,
+  dismissAny,
+  parkQuestion,
+  unparkQuestion,
   moveConcept,
   rejectConcept,
   rejectRelationship,
@@ -65,7 +67,11 @@ type State = {
   autoLayout: (sizes?: Record<string, NodeSize>) => void;
   /** Same layout, animated. Resolves once every node has landed. */
   layoutTo: (sizes?: Record<string, NodeSize>, ms?: number) => Promise<void>;
+  /** Close a question for good: a list item or a box, on the map or put off for later. */
   dismiss: (id: string) => void;
+  /** Put a question off for later, and bring it back. */
+  later: (id: string) => void;
+  back: (id: string) => void;
   toggleSuggestions: () => void;
   toggleAutoTidy: () => void;
   reset: () => void;
@@ -314,7 +320,9 @@ export const useSession = create<State>((set, get) => {
       frame = requestAnimationFrame(step);
     });
   },
-  dismiss: (id) => set((s) => ({ model: dismissQuestion(s.model, id) })),
+  dismiss: (id) => set((s) => ({ model: dismissAny(s.model, id) })),
+  later: (id) => set((s) => ({ model: parkQuestion(s.model, id) })),
+  back: (id) => set((s) => ({ model: unparkQuestion(s.model, id) })),
   toggleSuggestions: () => set((s) => ({ suggestions: !s.suggestions })),
   toggleAutoTidy: () => set((s) => ({ autoTidy: !s.autoTidy })),
   reset: () => {

@@ -112,6 +112,7 @@ function Flow() {
   const rejectRel = usePreload((s) => s.rejectRelationship);
   const answer = usePreload((s) => s.answer);
   const answering = usePreload((s) => s.answering);
+  const saveConceptQuestion = usePreload((s) => s.saveConceptQuestion);
   const storyMode = usePreload((s) => s.storyMode);
   const storyStep = usePreload((s) => s.storyStep);
   const setStoryStep = usePreload((s) => s.setStoryStep);
@@ -308,6 +309,9 @@ function Flow() {
             ? {
                 onAnswer: (text: string) => answer(c.id, text),
                 onDismiss: () => void reject(c.id),
+                // Preload's "later" is the list of questions to take into the interview.
+                onLater: () => void saveConceptQuestion(c.id),
+                laterLabel: 'Keep it in the questions to ask',
                 answerBusy: Boolean(answering),
               }
             : {}),
@@ -378,7 +382,7 @@ function Flow() {
     }));
 
     return { nodes: [...clusterNodes, ...conceptNodes], edges: [...conceptEdges, ...areaEdges], boxes };
-  }, [model, shown, level, openClusters, dimmed, selectedConcept, outline, index, step, savedTexts, confirm, reject, confirmRel, rejectRel, answer, answering, measured]);
+  }, [model, shown, level, openClusters, dimmed, selectedConcept, outline, index, step, savedTexts, confirm, reject, confirmRel, rejectRel, answer, answering, saveConceptQuestion, measured]);
 
   // Refit whenever what is on screen changes shape, not on every render or step.
   const shape = `${level}|${openClusters.join(',')}|${nodes.length}|${edges.length}|${Object.keys(measured).length}`;
