@@ -48,7 +48,11 @@ type State = {
   build: () => Promise<void>;
   resume: () => Promise<void>;
 
-  act: (action: Record<string, unknown>) => Promise<void>;
+  /** Resolves with the server's answer, or null when the action failed. */
+  act: (action: Record<string, unknown>) => Promise<Record<string, any> | null>;
+  /** The QUESTION box whose answer is being read, "" when none. */
+  answering: string;
+  answer: (conceptId: string, text: string) => Promise<{ ok: boolean; answered: boolean }>;
   confirm: (conceptId: string) => Promise<void>;
   reject: (conceptId: string) => Promise<void>;
   split: (conceptId: string, absorbedId: string) => Promise<void>;
@@ -146,6 +150,7 @@ export const usePreload = create<State>((set, get) => ({
   storyMode: 'LOGIC',
   storyStep: null,
   questionsOpen: false,
+  answering: '',
 
   checkHealth: async () => {
     try {
@@ -311,7 +316,7 @@ export const usePreload = create<State>((set, get) => ({
 
   act: async (action) => {
     const model = get().model;
-    if (!model?.run) return;
+    if (!model?.run) return null;
     try {
       const res = await fetch('/api/preload/act', {
         method: 'POST',
@@ -321,25 +326,62 @@ export const usePreload = create<State>((set, get) => ({
       const body = await readBody(res);
       if (!res.ok) throw new Error(body.error || 'That did not go through');
       set({ model: normaliseModel(body.model) });
+      return body;
     } catch (e) {
       set({ error: (e as Error).message });
+      return null;
     }
   },
 
-  confirm: async (conceptId) => get().act({ kind: 'confirm', conceptId }),
+  answer: async (conceptId, text) => {
+    const trimmed = text.trim();
+    if (!trimmed || get().answering) return { ok: false, answered: false };
+    set({ answering: conceptId, error: '' });
+    try {
+      const body = await get().act({ kind: 'answer', conceptId, text: trimmed });
+      if (!body) return { ok: false, answered: false };
+      const answered = Boolean(body.outcome?.answered);
+      if (answered && get().selectedConcept === conceptId) set({ selectedConcept: '' });
+      return { ok: true, answered };
+    } finally {
+      set({ answering: '' });
+    }
+  },
+
+  confirm: async (conceptId) => {
+    await get().act({ kind: 'confirm', conceptId });
+  },
   reject: async (conceptId) => {
     if (get().selectedConcept === conceptId) set({ selectedConcept: '' });
     await get().act({ kind: 'reject', conceptId });
   },
-  split: async (conceptId, absorbedId) => get().act({ kind: 'split', conceptId, absorbedId }),
-  resolve: async (conceptId, choice) => get().act({ kind: 'resolve', conceptId, choice }),
-  confirmRelationship: async (relationshipId) => get().act({ kind: 'confirm-rel', relationshipId }),
-  rejectRelationship: async (relationshipId) => get().act({ kind: 'reject-rel', relationshipId }),
-  saveQuestion: async (questionId) => get().act({ kind: 'question-save', questionId }),
-  unsaveQuestion: async (questionId) => get().act({ kind: 'question-unsave', questionId }),
-  dismissQuestion: async (questionId) => get().act({ kind: 'question-dismiss', questionId }),
-  addQuestion: async (text, anchorId) => get().act({ kind: 'question-add', text, anchorId: anchorId ?? '' }),
-  saveConceptQuestion: async (conceptId) => get().act({ kind: 'question-from-concept', conceptId }),
+  split: async (conceptId, absorbedId) => {
+    await get().act({ kind: 'split', conceptId, absorbedId });
+  },
+  resolve: async (conceptId, choice) => {
+    await get().act({ kind: 'resolve', conceptId, choice });
+  },
+  confirmRelationship: async (relationshipId) => {
+    await get().act({ kind: 'confirm-rel', relationshipId });
+  },
+  rejectRelationship: async (relationshipId) => {
+    await get().act({ kind: 'reject-rel', relationshipId });
+  },
+  saveQuestion: async (questionId) => {
+    await get().act({ kind: 'question-save', questionId });
+  },
+  unsaveQuestion: async (questionId) => {
+    await get().act({ kind: 'question-unsave', questionId });
+  },
+  dismissQuestion: async (questionId) => {
+    await get().act({ kind: 'question-dismiss', questionId });
+  },
+  addQuestion: async (text, anchorId) => {
+    await get().act({ kind: 'question-add', text, anchorId: anchorId ?? '' });
+  },
+  saveConceptQuestion: async (conceptId) => {
+    await get().act({ kind: 'question-from-concept', conceptId });
+  },
   downloadQuestions: () => {
     const m = get().model;
     if (!m) return;

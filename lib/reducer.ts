@@ -1,6 +1,7 @@
 import type { Blocked, CallMeta, Concept, Excerpt, Kind, LogEntry, Model, Question, Relationship, Statement } from './types';
 import { conceptDefaults, newId, noBlocks } from './types';
-import type { ExtractPatch, ExtractPatchPL, ProposePatch, ProposePatchRT } from './schema';
+import type { AnswerPatch, ExtractPatch, ExtractPatchPL, ProposePatch, ProposePatchRT } from './schema';
+import type { AnswerInput } from './prompts';
 import { capProposals, clearRejection, findDuplicate, isRejected, norm, saidThisTurn, wouldCreateCycle } from './guards';
 import { place, pointsOf, type PlaceKind, type Point } from './place';
 import { layoutLeftToRight, type NodeSize } from './layout';
@@ -24,6 +25,9 @@ function visible(c: Concept | Relationship): boolean {
   // A concept absorbed by a merge is still in the array, so the merge can be
   // undone (R1). It is not on the map.
   if ('absorbedInto' in c && c.absorbedInto) return false;
+  // An answered question has done its job. What the answer said is on the
+  // map in its own boxes; the question stays in the file, off the map.
+  if ('answeredAt' in c && c.answeredAt) return false;
   return true;
 }
 
@@ -705,7 +709,8 @@ export function conversationWindow(m: Model, limit = CONVERSATION_CHAR_LIMIT): {
   let used = 0;
   for (let i = m.statements.length - 1; i >= 0; i--) {
     const s = m.statements[i];
-    const line = `T${s.turn}: ${s.text}`;
+    const asked = s.questionId ? m.concepts.find((c) => c.id === s.questionId)?.label : '';
+    const line = asked ? `T${s.turn} (answer to "${asked}"): ${s.text}` : `T${s.turn}: ${s.text}`;
     if (used + line.length > limit && lines.length > 0) break;
     lines.push(line);
     used += line.length;
@@ -724,6 +729,13 @@ export function closedQuestions(m: Model): string[] {
   return [...dismissed, ...rejected];
 }
 
+/** Every question the person answered on the map, with what they said. */
+export function answeredQuestions(m: Model): { text: string; answer: string }[] {
+  return m.concepts
+    .filter((c) => c.kind === 'QUESTION' && c.answeredAt)
+    .map((c) => ({ text: c.label, answer: c.answer ?? '' }));
+}
+
 /** The compact projection sent to the LLM. Never the whole model. */
 export function contextPayload(m: Model) {
   const conversation = conversationWindow(m);
@@ -731,8 +743,7 @@ export function contextPayload(m: Model) {
     goal: m.goal,
     conversation: conversation.lines,
     omittedStatements: conversation.omitted,
-    // Filled in when questions can be answered (Release 2). Empty until then.
-    answeredQuestions: [] as { text: string; answer: string }[],
+    answeredQuestions: answeredQuestions(m),
     closedQuestions: closedQuestions(m),
     title: m.title,
     concepts: visibleConcepts(m).map((c) => ({
@@ -823,4 +834,202 @@ export function questionFromConcept(model: Model, conceptId: string, at = new Da
   const added = next.questions.find((q) => norm(q.text) === norm(c.label));
   if (!added || added.why || !c.note) return next;
   return { ...next, questions: next.questions.map((q) => (q.id === added.id ? { ...q, why: c.note } : q)) };
+}
+
+// ------------------------------------------------------------------ answers
+
+/*
+ * A QUESTION box answered on the map. Both modes use this: the live session
+ * through its store, Preload through the act route. The answer is read by its
+ * own call (ANSWER_SYSTEM) and the patch lands here.
+ *
+ * What the answer states goes through applyExtract unchanged, so it is green,
+ * cited to the answer, and merged with what is already there. On top of that
+ * the answer may correct an existing concept, confirm an orange guess or
+ * reject one. Every id is checked; one the map does not have is refused and
+ * counted as invented.
+ */
+
+/** The concept a QUESTION box hangs off: the other end of its first visible link. */
+export function questionAnchor(m: Model, questionId: string): Concept | undefined {
+  const ok = new Map(m.concepts.filter(visible).map((c) => [c.id, c]));
+  const link = m.relationships.find((r) => visible(r) && (r.from === questionId || r.to === questionId));
+  if (!link) return undefined;
+  return ok.get(link.from === questionId ? link.to : link.from);
+}
+
+/** What the answer call is given. Null when the box is gone or is not a question. */
+export function answerPayload(m: Model, questionId: string, answer: string): AnswerInput | null {
+  const q = m.concepts.find((c) => c.id === questionId && visible(c) && c.kind === 'QUESTION');
+  if (!q) return null;
+  const anchor = questionAnchor(m, questionId);
+  return {
+    goal: m.goal,
+    question: { id: q.id, text: q.label, why: q.note },
+    anchor: anchor ? { id: anchor.id, label: anchor.label, note: anchor.note } : null,
+    concepts: visibleConcepts(m)
+      .filter((c) => c.id !== q.id)
+      .map((c) => ({ id: c.id, label: c.label, note: c.note, status: c.status, kind: c.kind })),
+    relationships: visibleRelationships(m)
+      .filter((r) => r.from !== q.id && r.to !== q.id)
+      .map((r) => ({ from: r.from, to: r.to, label: r.label })),
+    answer: answer.trim(),
+  };
+}
+
+export type AnswerResult = {
+  model: Model;
+  blocked: Blocked;
+  /** False when the answer did not settle the question, which then stays on the map. */
+  answered: boolean;
+  added: number;
+  changed: number;
+  confirmed: number;
+  rejected: number;
+};
+
+export function applyAnswer(model: Model, questionId: string, answer: string, patch: AnswerPatch): AnswerResult {
+  const text = answer.trim();
+  const question = model.concepts.find((c) => c.id === questionId && visible(c) && c.kind === 'QUESTION');
+  const none: AnswerResult = { model, blocked: noBlocks(), answered: false, added: 0, changed: 0, confirmed: 0, rejected: 0 };
+  if (!question || !text) return none;
+
+  const anchor = questionAnchor(model, questionId);
+  const at = new Date().toISOString();
+  const before = new Set(model.concepts.map((c) => c.id));
+
+  // 1. What the answer states. Same path as speech, so it merges the same way.
+  const extracted = applyExtract(model, { concepts: patch.concepts, relationships: patch.relationships }, text);
+  let m = extracted.model;
+  const blocked = extracted.blocked;
+  const statementId = m.statements[m.statements.length - 1].id;
+  const turn = m.turn;
+  m = {
+    ...m,
+    statements: m.statements.map((s) => (s.id === statementId ? { ...s, questionId } : s)),
+  };
+
+  const created = m.concepts.filter((c) => !before.has(c.id)).map((c) => c.id);
+  const isKnown = (id: string) => id !== questionId && m.concepts.some((c) => c.id === id && visible(c));
+
+  // A new box takes the area of the concept it answers about, so Preload
+  // draws it beside that concept and not in "Not yet grouped".
+  if (anchor) {
+    m = {
+      ...m,
+      concepts: m.concepts.map((c) => (created.includes(c.id) ? { ...c, clusterId: anchor.clusterId, tier: 2 as const } : c)),
+    };
+  }
+
+  // Anything new the answer left floating is tied to what the question was
+  // about. The person tied it there by answering that question.
+  if (anchor) {
+    const linked = new Set(m.relationships.filter(visible).flatMap((r) => [r.from, r.to]));
+    const loose = created.filter((id) => !linked.has(id) && !m.concepts.find((c) => c.id === id)?.belongsTo);
+    m = {
+      ...m,
+      relationships: [
+        ...m.relationships,
+        ...loose.map((id) => ({
+          id: newId('r'),
+          from: anchor.id,
+          to: id,
+          label: 'answer',
+          origin: 'USER' as const,
+          status: 'VALIDATED' as const,
+          turn,
+          merges: [],
+        })),
+      ],
+    };
+  }
+
+  // 2. Corrections. The old wording goes in the log, so a change can be traced and undone.
+  const changes: { id: string; before: { label: string; note: string }; after: { label: string; note: string } }[] = [];
+  const seen = new Set<string>();
+  for (const u of patch.updates) {
+    if (!isKnown(u.id) || seen.has(u.id)) {
+      if (!isKnown(u.id)) blocked.invented++;
+      continue;
+    }
+    const c = m.concepts.find((x) => x.id === u.id)!;
+    const label = u.label.trim() || c.label;
+    const note = u.note.trim() || c.note;
+    if (label === c.label && note === c.note) continue;
+    seen.add(u.id);
+    changes.push({ id: c.id, before: { label: c.label, note: c.note }, after: { label, note } });
+    m = {
+      ...m,
+      concepts: m.concepts.map((x) =>
+        x.id === u.id
+          ? {
+              ...x,
+              label,
+              note,
+              // The person stated the corrected version, so a guess they corrected is now theirs.
+              status: x.status === 'PROPOSED' ? ('VALIDATED' as const) : x.status,
+              evidence: x.evidence.includes(statementId) ? x.evidence : [...x.evidence, statementId],
+              turn,
+            }
+          : x
+      ),
+    };
+  }
+
+  // 3. Guesses the answer settles. Only orange ones; green is corrected, never thrown out.
+  const guess = (id: string) => isKnown(id) && m.concepts.find((c) => c.id === id)?.status === 'PROPOSED';
+  const confirmIds = [...new Set(patch.confirms)].filter((id) => {
+    if (!isKnown(id)) blocked.invented++;
+    return guess(id);
+  });
+  const rejectIds = [...new Set(patch.rejects)].filter((id) => {
+    if (!isKnown(id)) blocked.invented++;
+    return guess(id) && !confirmIds.includes(id);
+  });
+  for (const id of confirmIds) {
+    m = confirmConcept(m, id);
+    m = {
+      ...m,
+      concepts: m.concepts.map((c) => (c.id === id && !c.evidence.includes(statementId) ? { ...c, evidence: [...c.evidence, statementId] } : c)),
+    };
+  }
+  for (const id of rejectIds) m = rejectConcept(m, id);
+
+  // 4. The question itself. Settled: off the map, with its answer kept. Not
+  // settled: it stays where it is, and what was said is still on the map.
+  const answered = patch.answersQuestion;
+  if (answered) {
+    m = {
+      ...m,
+      concepts: m.concepts.map((c) =>
+        c.id === questionId ? { ...c, answer: text, answeredAt: at, answerStatementId: statementId } : c
+      ),
+      // The same question kept in the list of questions to ask is done too.
+      questions: m.questions.map((q) =>
+        q.status === 'OPEN' && norm(q.text) === norm(question.label) ? { ...q, status: 'DONE' as const, answer: text } : q
+      ),
+    };
+  }
+
+  const result = {
+    added: created.length,
+    changed: changes.length,
+    confirmed: confirmIds.length,
+    rejected: rejectIds.length,
+  };
+  m = {
+    ...m,
+    log: [
+      ...m.log,
+      {
+        turn,
+        at,
+        kind: 'answer' as const,
+        payload: { questionId, question: question.label, answer: text, answered, patch, changes, ...result },
+        blocked,
+      },
+    ],
+  };
+
+  return { model: m, blocked, answered, ...result };
 }

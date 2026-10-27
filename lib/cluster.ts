@@ -1,5 +1,5 @@
 import type { Blocked, Cluster, Concept, Model } from './types';
-import { newId, noBlocks } from './types';
+import { newId, noBlocks, onMap } from './types';
 import type { ClusterPatch } from './schema';
 
 /*
@@ -23,7 +23,7 @@ import type { ClusterPatch } from './schema';
 const MAX_MAIN_PER_CLUSTER = 20;
 
 function visibleC(c: Concept): boolean {
-  return c.status !== 'REJECTED' && !c.absorbedInto;
+  return onMap(c);
 }
 
 function degrees(model: Model): Map<string, number> {

@@ -75,7 +75,8 @@ function height(c: Concept, width: number, charW: number, lineH: number, extra: 
   const inner = width - 30;
   const labelLines = Math.min(4, Math.max(1, Math.ceil((c.label.length * charW) / inner)));
   const noteLines = c.note ? Math.min(3, Math.ceil((c.note.length * 6.3) / inner)) : 0;
-  const buttons = c.status === 'PROPOSED' ? 34 : 0;
+  // A question carries an answer box; a guess carries Confirm and Reject.
+  const buttons = c.kind === 'QUESTION' ? 98 : c.status === 'PROPOSED' ? 34 : 0;
   return Math.round(26 + labelLines * lineH + (noteLines ? 6 + noteLines * 15.5 : 0) + buttons + extra);
 }
 
@@ -109,6 +110,8 @@ function Flow() {
   const reject = usePreload((s) => s.reject);
   const confirmRel = usePreload((s) => s.confirmRelationship);
   const rejectRel = usePreload((s) => s.rejectRelationship);
+  const answer = usePreload((s) => s.answer);
+  const answering = usePreload((s) => s.answering);
   const storyMode = usePreload((s) => s.storyMode);
   const storyStep = usePreload((s) => s.storyStep);
   const setStoryStep = usePreload((s) => s.setStoryStep);
@@ -301,6 +304,13 @@ function Flow() {
           saved: c.kind === 'QUESTION' && savedTexts.has(norm(c.label)),
           onConfirm: () => void confirm(c.id),
           onReject: () => void reject(c.id),
+          ...(c.kind === 'QUESTION'
+            ? {
+                onAnswer: (text: string) => answer(c.id, text),
+                onDismiss: () => void reject(c.id),
+                answerBusy: Boolean(answering),
+              }
+            : {}),
         },
       };
     });
@@ -368,7 +378,7 @@ function Flow() {
     }));
 
     return { nodes: [...clusterNodes, ...conceptNodes], edges: [...conceptEdges, ...areaEdges], boxes };
-  }, [model, shown, level, openClusters, dimmed, selectedConcept, outline, index, step, savedTexts, confirm, reject, confirmRel, rejectRel, measured]);
+  }, [model, shown, level, openClusters, dimmed, selectedConcept, outline, index, step, savedTexts, confirm, reject, confirmRel, rejectRel, answer, answering, measured]);
 
   // Refit whenever what is on screen changes shape, not on every render or step.
   const shape = `${level}|${openClusters.join(',')}|${nodes.length}|${edges.length}|${Object.keys(measured).length}`;

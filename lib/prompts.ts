@@ -6,7 +6,7 @@
  * back to the wording that produced it.
  */
 
-export const PROMPT_VERSION = 'p5-2026-10-25';
+export const PROMPT_VERSION = 'p6-2026-10-26';
 
 const KIND_VOCAB = `
 KIND. Seven values, and they classify the ROLE a thing plays in the
@@ -256,6 +256,90 @@ export function proposeUser(payload: {
       : []),
     ``,
     ...said,
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------- answers
+
+/*
+ * A person answered a QUESTION box on the map. Both modes use this call: the
+ * live session from the box on its canvas, Preload from the box on its map.
+ * It is Call 1 with a question attached, plus the one thing Call 1 cannot do:
+ * change what is already on the map when the answer says it is wrong.
+ */
+export const ANSWER_SYSTEM = `
+A question was shown on a map of someone's situation, and the person has
+answered it. You turn the answer into changes to the map.
+
+YOUR ONE RULE: record only what the answer says. Nothing it merely suggests.
+
+NEW THINGS. Anything the answer states that is not on the map yet goes in
+concepts, exactly as you would record it from speech: short labels in the
+person's words, a note for the detail or value they gave, the right kind.
+If the answer talks about something already on the map, put its id in
+matchesExistingId instead of making a second box.
+
+CONNECT IT. The question is about one concept, named below. Connect what the
+answer says to that concept with a relationship in the person's own verb, or
+make it a property of that concept with belongsTo. Use ids or tempIds.
+
+CHANGES TO WHAT IS THERE. When the answer corrects or sharpens something
+already on the map, put it in updates: its id, the corrected label or the
+corrected note, and an empty string for whichever stays the same. "It is 7
+days, not 14" changes the note of the cancellation window. A new detail
+about an existing thing is a note update, not a new box.
+
+GUESSES. Items marked [PROPOSED] are the AI's guesses. If the answer says a
+guess is right, put its id in confirms. If the answer says a guess is wrong
+or does not apply, put its id in rejects. Never reject an item marked
+[VALIDATED]: if the answer contradicts it, correct it through updates.
+
+DID IT ANSWER. answersQuestion is true when the answer settles the question.
+It is false when the person does not know, puts it off, or answers only part
+of it. What they did say is still recorded either way.
+
+Use only ids from the map below. An empty answer in every array is correct
+when the person said nothing that changes the map.
+
+${KIND_VOCAB}
+`.trim();
+
+export type AnswerInput = {
+  goal: string;
+  question: { id: string; text: string; why: string };
+  anchor: { id: string; label: string; note: string } | null;
+  concepts: { id: string; label: string; note: string; status: string; kind: string }[];
+  relationships: { from: string; to: string; label: string }[];
+  answer: string;
+};
+
+export function answerUser(input: AnswerInput): string {
+  const concepts = input.concepts.length
+    ? input.concepts.map((c) => `  ${c.id}  [${c.status}] ${c.label}${c.note ? ` (${c.note})` : ''}`).join('\n')
+    : '  (the map is empty)';
+  const rels = input.relationships.length
+    ? input.relationships.map((r) => `  ${r.from} --${r.label}--> ${r.to}`).join('\n')
+    : '  (none)';
+  const about = input.anchor
+    ? `It is about "${input.anchor.label}" (${input.anchor.id})${input.anchor.note ? `: ${input.anchor.note}` : ''}.`
+    : 'It is not attached to any concept.';
+
+  return [
+    ...(input.goal.trim() ? [`GOAL OF THIS SESSION: ${input.goal.trim()}`, ``] : []),
+    `CURRENT MAP`,
+    concepts,
+    ``,
+    `RELATIONSHIPS`,
+    rels,
+    ``,
+    `THE QUESTION (${input.question.id}): ${input.question.text}`,
+    ...(input.question.why ? [`Why it was asked: ${input.question.why}`] : []),
+    about,
+    ``,
+    `THE PERSON'S ANSWER`,
+    `"""`,
+    input.answer,
+    `"""`,
   ].join('\n');
 }
 

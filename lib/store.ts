@@ -4,6 +4,8 @@ import { create } from 'zustand';
 import type { Blocked, Model } from './types';
 import { addBlocks, emptyModel, newId, noBlocks } from './types';
 import {
+  answerPayload,
+  applyAnswer,
   applyAutoLayout,
   applyExtract,
   applyPropose,
@@ -17,7 +19,7 @@ import {
   setGoal,
   withCallMeta,
 } from './reducer';
-import { ExtractPatch, ProposePatchRT } from './schema';
+import { AnswerPatch, ExtractPatch, ProposePatchRT } from './schema';
 import type { NodeSize } from './layout';
 import { toDrawioXml, toMermaid } from './export';
 import { saveDataUrl, saveText } from './download';
@@ -41,6 +43,12 @@ type State = {
   blocked: Blocked;
 
   submit: (text: string) => Promise<void>;
+  /**
+   * Answer a QUESTION box on the map. The answer is read, the map changes to
+   * match it, and then the usual proposal call runs. Resolves false when the
+   * answer could not be read, so the box keeps what was typed.
+   */
+  answerQuestion: (questionId: string, text: string) => Promise<{ ok: boolean; answered: boolean }>;
   setGoal: (text: string) => void;
   /** Replace the session with one restored from this browser or from a file. */
   restore: (model: Model) => void;
@@ -88,7 +96,45 @@ function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
 }
 
-export const useSession = create<State>((set, get) => ({
+export const useSession = create<State>((set, get) => {
+  /*
+   * Phase 2 of a turn, shared by the composer and by an answer on the map:
+   * what is missing, given what the map now holds. Silent on failure.
+   */
+  const proposeAfter = async (after: Model, latest: string): Promise<void> => {
+    if (!get().suggestions) {
+      set({ phase: 'idle', pending: '' });
+      return;
+    }
+    set({ phase: 'thinking' });
+    try {
+      const res = await fetch('/api/propose', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(contextPayload(after)),
+      });
+
+      const body = await res.json();
+      if (res.ok && body.patch) {
+        const patch = ProposePatchRT.parse(body.patch);
+        const applied = applyPropose(get().model, patch, Number(process.env.NEXT_PUBLIC_PROPOSAL_CAP) || 5, {
+          questionCap: QUESTION_CAP,
+          latestStatement: latest,
+        });
+        set((s) => ({
+          model: withCallMeta(applied.model, 'propose', metaOf(body)),
+          blocked: addBlocks(s.blocked, applied.blocked),
+          lastMs: { ...s.lastMs, propose: body.ms ?? 0 },
+        }));
+      }
+    } catch {
+      // Deliberately silent. No orange this turn, and nobody in the room notices.
+    } finally {
+      set({ phase: 'idle', pending: '' });
+    }
+  };
+
+  return {
   model: emptyModel(newId('s')),
   phase: 'idle',
   pending: '',
@@ -145,38 +191,44 @@ export const useSession = create<State>((set, get) => ({
       return;
     }
 
-    if (!get().suggestions) {
-      set({ phase: 'idle', pending: '' });
-      return;
-    }
+    await proposeAfter(afterExtract, trimmed);
+  },
 
-    // ---- Phase 2: what is missing
-    set({ phase: 'thinking' });
+  answerQuestion: async (questionId, text) => {
+    const trimmed = text.trim();
+    if (!trimmed || get().phase !== 'idle') return { ok: false, answered: false };
+    const input = answerPayload(get().model, questionId, trimmed);
+    if (!input) return { ok: false, answered: false };
+
+    set({ phase: 'reading', pending: trimmed, error: '' });
+
+    let afterAnswer: Model;
+    let answered = false;
     try {
-      const res = await fetch('/api/propose', {
+      const res = await fetch('/api/answer', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(contextPayload(afterExtract)),
+        body: JSON.stringify(input),
       });
-
       const body = await res.json();
-      if (res.ok && body.patch) {
-        const patch = ProposePatchRT.parse(body.patch);
-        const applied = applyPropose(get().model, patch, Number(process.env.NEXT_PUBLIC_PROPOSAL_CAP) || 5, {
-          questionCap: QUESTION_CAP,
-          latestStatement: trimmed,
-        });
-        set((s) => ({
-          model: withCallMeta(applied.model, 'propose', metaOf(body)),
-          blocked: addBlocks(s.blocked, applied.blocked),
-          lastMs: { ...s.lastMs, propose: body.ms ?? 0 },
-        }));
-      }
-    } catch {
-      // Deliberately silent. No orange this turn, and nobody in the room notices.
-    } finally {
-      set({ phase: 'idle', pending: '' });
+      if (!res.ok) throw new Error(body.error || `Could not read the answer (${res.status})`);
+
+      const patch = AnswerPatch.parse(body.patch);
+      const applied = applyAnswer(get().model, questionId, trimmed, patch);
+      afterAnswer = withCallMeta(applied.model, 'answer', metaOf(body));
+      answered = applied.answered;
+      set((s) => ({
+        model: afterAnswer,
+        blocked: applied.blocked,
+        lastMs: { ...s.lastMs, extract: body.ms ?? 0 },
+      }));
+    } catch (e) {
+      set({ phase: 'idle', pending: '', error: (e as Error).message });
+      return { ok: false, answered: false };
     }
+
+    await proposeAfter(afterAnswer, trimmed);
+    return { ok: true, answered };
   },
 
   confirm: (id) => set((s) => ({ model: confirmConcept(s.model, id) })),
@@ -310,4 +362,5 @@ export const useSession = create<State>((set, get) => ({
     const m = get().model;
     saveText(`${filenameBase(m)}.mmd`, 'text/plain', toMermaid(m));
   },
-}));
+};
+});

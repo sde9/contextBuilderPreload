@@ -1,5 +1,5 @@
 import type { Blocked, Chunk, Cluster, Concept, Excerpt, LinkType, Model, Outline, PartPattern, Relationship, Source } from './types';
-import { conceptDefaults, newId, noBlocks } from './types';
+import { conceptDefaults, newId, noBlocks, onMap } from './types';
 import type { OutlinePatch } from './schema';
 import { norm } from './guards';
 
@@ -223,7 +223,7 @@ export function applyOutline(model: Model, patch: OutlinePatch, chunks: Chunk[],
 // ------------------------------------------------------------------ areas
 
 function visibleC(c: Concept): boolean {
-  return c.status !== 'REJECTED' && !c.absorbedInto;
+  return onMap(c);
 }
 
 /** Follow a merge to the concept that survived it. */

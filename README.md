@@ -87,6 +87,30 @@ when it is called without options.
 
 ---
 
+## Answers on the map, both modes (26 Oct 2026)
+
+A question box used to offer only Confirm and Reject, which does not fit a
+question. Now it takes an answer, in Real-time and in Preload alike.
+
+| What changed for the user | Where |
+|---|---|
+| A question box has an answer field with **Answer** (or Cmd+Enter) and **Dismiss**. Confirm and Reject stay on the AI's other guesses only | `ConceptNode.tsx` (`AnswerBox`) |
+| The answer is read against the map, and the map changes to match it: what the answer states lands green and cites the answer; a label or note it corrects is changed, with the old wording kept in the log; an orange guess it confirms turns green, one it denies is rejected. A green concept is never thrown out by an answer, only corrected | `ANSWER_SYSTEM`, `AnswerPatch`, `applyAnswer` |
+| Something new the answer leaves unconnected is tied to the concept the question was about | `applyAnswer` |
+| A question the answer settles leaves the map and keeps its answer in the file. "Not sure" or half an answer is still recorded, and the box stays with a line saying so | `answersQuestion` |
+| Real-time: after an answer, the usual proposal call runs, and it is told which questions are answered so it does not ask them again | `answerQuestion` in `lib/store.ts`, `contextPayload.answeredQuestions` |
+| Preload: the answer is saved to the run like any other decision. The evidence panel shows it as "answer to ...", and the questions panel lists what was answered | `api/preload/act` (`answer`), `EvidencePanel`, `QuestionsPanel` |
+
+The answer call uses `ANSWER_MODEL`, then `EXTRACT_MODEL`, then Haiku 4.5.
+Each answer is logged with its model, time and tokens. `PROMPT_VERSION` is
+`p6-2026-10-26`.
+
+Not done here: questions as their own records (Release 2, steps 2.1 to 2.3),
+**Later** with a parked list, and answering list questions in the gap bar.
+This change keeps questions as boxes, so old files and runs load unchanged.
+
+---
+
 ## Preload, 25 Oct 2026: the document's own structure
 
 Changes after the first real chapter went through. A map of a Word chapter came

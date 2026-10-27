@@ -19,6 +19,9 @@
 import { emptyModel, normaliseModel, resolveKind } from '../lib/types';
 import { saidThisTurn } from '../lib/guards';
 import {
+  answerPayload,
+  answeredQuestions,
+  applyAnswer,
   applyExtract,
   applyPropose,
   closedQuestions,
@@ -572,6 +575,97 @@ check('a concept with a valid kind keeps it', resolveKind({ kind: 'RULE' }) === 
   check('the echo is counted as a duplicate', echoed.blocked.duplicates === 1);
   const preloadLike = applyPropose(e, echoPatch, 5);
   check('without a latest statement (Preload), nothing is dropped as an echo', visibleConcepts(preloadLike.model).some((c) => c.label === 'School donations'));
+}
+
+
+// ---- answers on the map (both modes) ----------------------------------------
+{
+  let a = emptyModel('s_answer');
+  ({ model: a } = applyExtract(
+    a,
+    {
+      concepts: [
+        { tempId: 'n1', label: 'Costume Rental', note: '', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' },
+        { tempId: 'n2', label: 'Cancellation window', note: '14 days', matchesExistingId: '', kind: 'RULE', belongsTo: '' },
+      ],
+      relationships: [{ from: 'n1', to: 'n2', label: 'has' }],
+    },
+    'We rent costumes. You can cancel within 14 days.'
+  ));
+  const rental = a.concepts.find((c) => c.label === 'Costume Rental')!;
+  const window = a.concepts.find((c) => c.label === 'Cancellation window')!;
+  ({ model: a } = applyPropose(
+    a,
+    {
+      concepts: [
+        { tempId: 'p1', label: 'Who pays delivery?', why: 'Delivery cost is open', attachTo: rental.id, relationLabel: 'raises', kind: 'QUESTION', isPropertyOfTarget: false },
+        { tempId: 'p2', label: 'Deposit', why: 'Rentals usually take one', attachTo: rental.id, relationLabel: 'requires', kind: 'ENTITY', isPropertyOfTarget: false },
+        { tempId: 'p3', label: 'Late fee', why: 'Returns can be late', attachTo: rental.id, relationLabel: 'charges', kind: 'RULE', isPropertyOfTarget: false },
+      ],
+      relationships: [],
+      questions: [],
+    }
+  ));
+  const q = a.concepts.find((c) => c.kind === 'QUESTION')!;
+  const deposit = a.concepts.find((c) => c.label === 'Deposit')!;
+  const lateFee = a.concepts.find((c) => c.label === 'Late fee')!;
+
+  const input = answerPayload(a, q.id, '  The client pays delivery, $15. ');
+  check('the answer call knows what the question is about', input?.anchor?.id === rental.id);
+  check('the question box itself is not offered as something to change', !input?.concepts.some((c) => c.id === q.id));
+  check('no payload for a concept that is not a question', answerPayload(a, rental.id, 'x') === null);
+
+  const text = 'The client pays delivery, $15. We do take a deposit, no late fee, and cancellation is 7 days.';
+  const r = applyAnswer(a, q.id, text, {
+    answersQuestion: true,
+    concepts: [
+      { tempId: 'n1', label: 'Delivery fee', note: '$15, paid by the client', matchesExistingId: '', kind: 'ATTRIBUTE', belongsTo: rental.id },
+      { tempId: 'n2', label: 'Client', note: '', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' },
+    ],
+    relationships: [],
+    updates: [
+      { id: window.id, label: '', note: '7 days' },
+      { id: 'c_made_up', label: 'Nope', note: '' },
+    ],
+    confirms: [deposit.id],
+    rejects: [lateFee.id, rental.id],
+  });
+  const b = r.model;
+  const fee = b.concepts.find((c) => c.label === 'Delivery fee')!;
+  const client = b.concepts.find((c) => c.label === 'Client')!;
+  const st = b.statements.at(-1)!;
+
+  check('an answered question leaves the map', !visibleConcepts(b).some((c) => c.id === q.id));
+  check('it keeps its answer in the file', b.concepts.find((c) => c.id === q.id)?.answer === text.trim());
+  check('the answer is a statement tied to the question', st.text === text && st.questionId === q.id);
+  check('what the answer states is green and cites the answer', fee.status === 'VALIDATED' && fee.origin === 'EXPLICIT' && fee.evidence.includes(st.id));
+  check('a property in the answer belongs to what it is about', fee.belongsTo === rental.id);
+  check('a loose new box is tied to the question\'s concept', b.relationships.some((x) => x.from === rental.id && x.to === client.id && x.status === 'VALIDATED' && x.origin === 'USER'));
+  check('a correction changes the note, keeps the label', b.concepts.find((c) => c.id === window.id)?.note === '7 days' && b.concepts.find((c) => c.id === window.id)?.label === 'Cancellation window');
+  check('the corrected concept cites the answer', b.concepts.find((c) => c.id === window.id)!.evidence.includes(st.id));
+  check('the old wording is in the log', JSON.stringify(b.log.at(-1)?.payload).includes('14 days'));
+  check('an unknown id is refused and counted', r.blocked.invented === 1 && !b.concepts.some((c) => c.label === 'Nope'));
+  check('a guess the answer confirms turns green', b.concepts.find((c) => c.id === deposit.id)?.status === 'VALIDATED');
+  check('a guess the answer denies is rejected and remembered', !visibleConcepts(b).some((c) => c.id === lateFee.id) && b.rejected.some((x) => x.label.includes('late fee')));
+  check('a green concept is never rejected by an answer', b.concepts.find((c) => c.id === rental.id)?.status === 'VALIDATED');
+  check('the counts add up', r.added === 2 && r.changed === 1 && r.confirmed === 1 && r.rejected === 1);
+  check('later proposals hear the answer', answeredQuestions(b).some((x) => x.text === q.label && x.answer.includes('$15')));
+  check('the conversation shows what was answered', conversationWindow(b).lines.at(-1)!.includes(`answer to "${q.label}"`));
+  check('the answer is logged', b.log.at(-1)?.kind === 'answer');
+
+  const partial = applyAnswer(a, q.id, 'Not sure yet, maybe the client.', {
+    answersQuestion: false,
+    concepts: [],
+    relationships: [],
+    updates: [],
+    confirms: [],
+    rejects: [],
+  });
+  check('an answer that does not settle it leaves the question on the map', visibleConcepts(partial.model).some((c) => c.id === q.id) && !partial.answered);
+  check('what was said is still recorded', partial.model.statements.at(-1)?.questionId === q.id);
+
+  const gone = applyAnswer(b, q.id, 'again', { answersQuestion: true, concepts: [], relationships: [], updates: [], confirms: [], rejects: [] });
+  check('a question already answered cannot be answered again', gone.model === b);
 }
 
 // ---- call meta ---------------------------------------------------------------
