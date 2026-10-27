@@ -19,10 +19,18 @@
 import { emptyModel, normaliseModel, questionState, resolveKind } from '../lib/types';
 import { outputModeFor } from '../lib/llm';
 import { escapeHtml, reportCounts, toReportHtml } from '../lib/report';
-import { extractUser, proposeUser } from '../lib/prompts';
+import { extractUser, proposeUser, recapUser } from '../lib/prompts';
+import { bornTurnOf, conceptLineage, foldedDetails, replayAt, turnChanges } from '../lib/understanding';
 import { saidThisTurn } from '../lib/guards';
 import {
   activeQuestions,
+  addRecap,
+  applyAutoLayout,
+  closeRecap,
+  groundRecapLine,
+  openRecap,
+  recapDue,
+  recapPayload,
   applyFinishReview,
   cardQuestions,
   keptQuestions,
@@ -1002,6 +1010,122 @@ check('a concept with a valid kind keeps it', resolveKind({ kind: 'RULE' }) === 
   check('R4: Fable uses structured outputs', outputModeFor('claude-fable-5-1', undefined) === 'json');
   check('R4: Haiku 4.5 keeps forced tool use by default', outputModeFor('claude-haiku-4-5-20251001', undefined) === 'tool');
   check('R4: the setting can switch any model to json', outputModeFor('claude-haiku-4-5-20251001', 'json') === 'json');
+}
+
+// ==== KVIF: understanding the live map ========================================
+{
+  // Three turns: a thing with a detail, a guess, the guess said out loud.
+  let k = applyExtract(
+    emptyModel('s_kvif'),
+    {
+      concepts: [
+        { tempId: 'n1', label: 'Concert', note: '12 December', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' },
+        { tempId: 'n2', label: 'Ticket price', note: '$15', matchesExistingId: '', kind: 'ATTRIBUTE', belongsTo: 'n1' },
+        { tempId: 'n3', label: 'Anna', note: '', matchesExistingId: '', kind: 'ACTOR', belongsTo: '' },
+      ],
+      relationships: [
+        { from: 'n1', to: 'n2', label: 'costs' },
+        { from: 'n3', to: 'n1', label: 'organises' },
+      ],
+    },
+    'Anna organises the concert on 12 December, tickets are $15.'
+  ).model;
+  const concert = k.concepts.find((c) => c.label === 'Concert')!;
+  const price = k.concepts.find((c) => c.label === 'Ticket price')!;
+  const anna = k.concepts.find((c) => c.label === 'Anna')!;
+  ({ model: k } = applyPropose(k, {
+    concepts: [
+      { tempId: 'p1', label: 'Sound engineer', why: 'A concert needs sound', attachTo: concert.id, relationLabel: 'needs', kind: 'ACTOR', isPropertyOfTarget: false },
+      { tempId: 'p2', label: 'Raffle', why: 'Fairs often have one', attachTo: concert.id, relationLabel: 'includes', kind: 'ENTITY', isPropertyOfTarget: false },
+    ],
+    relationships: [],
+    questions: [{ text: 'Who sells tickets?', usefulness: 4, why: '', attachTo: concert.id }],
+  }, 5, { questionsAsRecords: true }));
+  const sound = k.concepts.find((c) => c.label === 'Sound engineer')!;
+  const raffle = k.concepts.find((c) => c.label === 'Raffle')!;
+
+  check('K: a new concept knows the turn it appeared', price.bornTurn === 1 && sound.bornTurn === 1);
+  check('K: this turn\'s boxes are marked new', turnChanges(k).has(concert.id) && turnChanges(k).has(sound.id));
+
+  k = applyExtract(k, { concepts: [{ tempId: 'n1', label: 'Venue', note: 'school hall', matchesExistingId: '', kind: 'ENTITY', belongsTo: '' }], relationships: [{ from: concert.id, to: 'n1', label: 'held at' }] }, 'It is in the school hall.').model;
+  check('K: only the newest turn is new', turnChanges(k).has(k.concepts.find((c) => c.label === 'Venue')!.id) && !turnChanges(k).has(anna.id));
+
+  k = applyExtract(k, { concepts: [{ tempId: 'n1', label: 'Sound engineer', note: 'Ben', matchesExistingId: sound.id, kind: 'ACTOR', belongsTo: '' }], relationships: [] }, 'Ben does the sound.').model;
+  const soundNow = k.concepts.find((c) => c.id === sound.id)!;
+  check('K: a guess said out loud keeps its first turn', soundNow.bornTurn === 1 && soundNow.turn === 3 && soundNow.status === 'VALIDATED');
+
+  // Lineage (P2, P9)
+  const said = conceptLineage(k, concert.id)!;
+  check('K: a said box shows the words it came from', said.status === 'SAID' && said.sources[0].text.startsWith('Anna organises') && said.sources[0].turn === 1);
+  check('K: it lists its details and links', said.details.some((d) => d.id === price.id) && said.links.some((l) => l.otherId === anna.id && l.direction === 'in'));
+  check('K: it lists questions about it', said.questions.some((q) => q.text === 'Who sells tickets?' && q.state === 'OPEN'));
+  const guess = conceptLineage(k, raffle.id)!;
+  check('K: a guess has no words behind it, and says why it was guessed', guess.status === 'GUESS' && guess.sources.length === 0 && guess.why === 'Fairs often have one');
+  check('K: a guess names what it was guessed from', guess.guessedFrom?.id === concert.id);
+  const confirmedGuess = conceptLineage(k, sound.id)!;
+  check('K: a guess said later reads as a confirmed guess, with its history', confirmedGuess.status === 'GUESS_CONFIRMED' && confirmedGuess.events.some((e) => e.turn === 3 && e.text.startsWith('Said out loud')));
+  const detail = conceptLineage(k, price.id)!;
+  check('K: a detail names its owner', detail.owner?.id === concert.id);
+  const clicked = conceptLineage(confirmConcept(k, raffle.id), raffle.id)!;
+  check('K: Confirm shows in the history', clicked.events.some((e) => e.text === 'You confirmed it'));
+  check('K: an unknown id has no lineage', conceptLineage(k, 'c_nope') === null);
+
+  // Folding (P5, P6)
+  const f = foldedDetails(k);
+  check('K: a green detail linked only to its owner folds into it', f.folded.has(price.id) && f.byOwner.get(concert.id)?.[0].id === price.id);
+  check('K: things, people and guesses never fold', !f.folded.has(concert.id) && !f.folded.has(anna.id) && !f.folded.has(raffle.id));
+  const linked = { ...k, relationships: [...k.relationships, { id: 'r_x', from: price.id, to: anna.id, label: 'set by', origin: 'EXPLICIT' as const, status: 'VALIDATED' as const, turn: 3, merges: [] }] };
+  check('K: a detail linked to something else stays a box', !foldedDetails(linked).folded.has(price.id));
+  let chain = applyExtract(k, { concepts: [{ tempId: 'n1', label: 'Student discount', note: '$10', matchesExistingId: '', kind: 'ATTRIBUTE', belongsTo: price.id }], relationships: [{ from: price.id, to: 'n1', label: 'has' }] }, 'Students pay $10.').model;
+  const student = chain.concepts.find((c) => c.label === 'Student discount')!;
+  check('K: a detail with details of its own stays a box, and they fold into it', !foldedDetails(chain).folded.has(price.id) && foldedDetails(chain).byOwner.get(price.id)?.[0].id === student.id);
+  const laid = applyAutoLayout(k, {}, f.folded);
+  check('K: layout leaves folded details where they were', laid.concepts.find((c) => c.id === price.id)!.x === k.concepts.find((c) => c.id === price.id)!.x);
+
+  // Replay (P11)
+  const t1 = replayAt(k, 1);
+  const venue = k.concepts.find((c) => c.label === 'Venue')!;
+  check('K: after turn 1 the venue was still to come', !t1.concepts.has(venue.id) && t1.concepts.has(concert.id));
+  check('K: after turn 1 the sound engineer was a guess', t1.concepts.get(sound.id) === 'PROPOSED');
+  check('K: after turn 3 it was confirmed', replayAt(k, 3).concepts.get(sound.id) === 'VALIDATED');
+  check('K: a link appears with both its ends', !t1.relationships.has(k.relationships.find((r) => r.to === venue.id)!.id) && replayAt(k, 2).relationships.has(k.relationships.find((r) => r.to === venue.id)!.id));
+  check('K: the replay shows what was said at that turn', replayAt(k, 2).said[0]?.text === 'It is in the school hall.');
+  const clickConfirmed = confirmConcept(k, raffle.id);
+  check('K: a guess confirmed by click turns green at that turn', replayAt(clickConfirmed, 2).concepts.get(raffle.id) === 'PROPOSED' && replayAt(clickConfirmed, 3).concepts.get(raffle.id) === 'VALIDATED');
+  const old = { ...k, concepts: k.concepts.map((c) => (c.id === venue.id ? { ...c, bornTurn: undefined } : c)) };
+  check('K: an old file uses the earliest evidence turn', bornTurnOf(old, old.concepts.find((c) => c.id === venue.id)!) === 2);
+
+  // Read-back (P7)
+  check('K: a read-back is due after four turns with enough on the map', !recapDue(k) && recapDue({ ...k, turn: 4 }));
+  let r = addRecap({ ...k, turn: 4 }, [
+    { text: 'Anna organises the concert.', kind: 'CONFIRMED', conceptIds: [anna.id, concert.id] },
+    { text: 'There is a raffle.', kind: 'CONFIRMED', conceptIds: [raffle.id, 'c_nope'] },
+    { text: 'Who sells tickets is open.', kind: 'OPEN', conceptIds: [] },
+    { text: 'Ben  does   the sound.', kind: 'GUESS', conceptIds: [] },
+    { text: 'A fifth line.', kind: 'CONFIRMED', conceptIds: [concert.id] },
+  ]);
+  const card = openRecap(r)!;
+  check('K: at most four lines', card.lines.length === 4);
+  check('K: a line on said things is CONFIRMED', card.lines[0].kind === 'CONFIRMED');
+  check('K: a line resting on a guess is a GUESS, whatever the AI called it', card.lines[1].kind === 'GUESS');
+  check('K: unknown ids are dropped', !card.lines[1].conceptIds.includes('c_nope'));
+  check('K: OPEN stays open', card.lines[2].kind === 'OPEN');
+  check('K: a line resting on nothing cannot be CONFIRMED', card.lines[3].kind === 'GUESS' && card.lines[3].text === 'Ben does the sound.');
+  check('K: no new read-back while one is open', !recapDue({ ...r, turn: 9 }));
+  r = groundRecapLine(r, card.id, 1, 'RIGHT');
+  check('K: Right confirms the guess the line rests on', r.concepts.find((c) => c.id === raffle.id)?.status === 'VALIDATED');
+  check('K: and it shows in the lineage and the replay', conceptLineage(r, raffle.id)!.events.some((e) => e.text === 'You said the read-back was right') && replayAt(r, 4).concepts.get(raffle.id) === 'VALIDATED');
+  const twice = groundRecapLine(r, card.id, 1, 'WRONG', 'no');
+  check('K: a line answered once cannot be answered again', twice === r);
+  r = groundRecapLine(r, card.id, 0, 'WRONG', 'Marta organises it');
+  check('K: Not quite keeps the correction and confirms nothing', openRecap(r)!.lines[0].correction === 'Marta organises it' && r.concepts.find((c) => c.id === anna.id)?.status === 'VALIDATED');
+  r = groundRecapLine(groundRecapLine(r, card.id, 2, 'RIGHT'), card.id, 3, 'RIGHT');
+  check('K: the card closes once every line is answered', openRecap(r) === null);
+  const shut = addRecap(k, [{ text: 'x', kind: 'OPEN', conceptIds: [] }]);
+  check('K: close shuts the card on screen', openRecap(closeRecap(shut, openRecap(shut)!.id)) === null);
+  check('K: an empty read-back adds nothing', addRecap(k, [{ text: '  ', kind: 'OPEN', conceptIds: [] }]) === k);
+  check('K: recaps survive a save and reload', normaliseModel(JSON.parse(JSON.stringify(r))).recaps?.length === 1);
+  check('K: the read-back prompt marks guesses', recapUser(recapPayload(k)).includes('[PROPOSED] Raffle'));
 }
 
 console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) failed.`}`);

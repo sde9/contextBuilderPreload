@@ -644,3 +644,52 @@ export const OUTLINE_JSON_SCHEMA = {
     },
   },
 } as const;
+
+// ---------------------------------------------------------------- Read-back
+
+/*
+ * RecapPatch (KVIF P7). "Did I get this right?": a few lines reading the map
+ * back in plain words. Each line names the concept ids it rests on. The kind
+ * the AI gives is only a hint: the reducer decides it from the map, so a
+ * line resting on a guess can never be shown as confirmed.
+ */
+export const RecapPatch = z.object({
+  lines: z.array(
+    z.object({
+      text: z.string(),
+      kind: z.enum(['CONFIRMED', 'GUESS', 'OPEN']),
+      conceptIds: z.array(z.string()),
+    })
+  ),
+});
+
+export type RecapPatch = z.infer<typeof RecapPatch>;
+
+export const RECAP_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['lines'],
+  properties: {
+    lines: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text', 'kind', 'conceptIds'],
+        properties: {
+          text: { type: 'string', description: 'One short sentence in the words the person used, as you understood it.' },
+          kind: {
+            type: 'string',
+            enum: ['CONFIRMED', 'GUESS', 'OPEN'],
+            description: 'CONFIRMED = rests on what the person said. GUESS = rests on at least one [PROPOSED] item. OPEN = something still unknown.',
+          },
+          conceptIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Ids of the concepts on the map this line rests on.',
+          },
+        },
+      },
+    },
+  },
+} as const;

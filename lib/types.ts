@@ -118,6 +118,12 @@ export type Concept = {
   answerStatementId?: string;
   /** A QUESTION box put off for later. Off the map, in the Later list, until answered or brought back. */
   parkedAt?: string;
+  /**
+   * The turn the concept first appeared. `turn` moves when it is said again;
+   * this never does. The history replay reads it. Absent in files saved
+   * before 27 Oct 2026, where the earliest evidence turn stands in for it.
+   */
+  bornTurn?: number;
 };
 
 /**
@@ -226,6 +232,34 @@ export function questionState(q: Question): QuestionState {
   return q.parkedAt ? 'PARKED' : 'OPEN';
 }
 
+/*
+ * Real-time. "Did I get this right?" (KVIF P7, grounding). A short read-back
+ * of the map in the AI's words, line by line, which the person confirms or
+ * corrects. A line's kind is decided from the map, never taken from the AI:
+ * a line that rests on a guess is a guess, however it is worded (KVIF P3).
+ */
+export type RecapKind = 'CONFIRMED' | 'GUESS' | 'OPEN';
+
+export type RecapLine = {
+  text: string;
+  kind: RecapKind;
+  /** The concepts this line rests on. Only ids that were on the map. */
+  conceptIds: string[];
+  /** '' until the person answers this line. */
+  verdict: '' | 'RIGHT' | 'WRONG';
+  /** What the person said instead, when they corrected it. */
+  correction: string;
+};
+
+export type Recap = {
+  id: string;
+  turn: number;
+  at: string;
+  lines: RecapLine[];
+  /** Set when the card is closed, answered or not. */
+  closedAt: string;
+};
+
 /** Real-time, at Finish (RT-US-12, RT-US-13). */
 export type Wrapup = {
   at: string;
@@ -293,7 +327,9 @@ export type LogEntry = {
     | 'outline'
     | 'question'
     | 'answer'
-    | 'finish';
+    | 'finish'
+    | 'recap'
+    | 'ground';
   payload: unknown;
   /** Guard activity, so prompt failures are measurable rather than invisible. */
   blocked?: Blocked;
@@ -465,6 +501,8 @@ export type Model = {
    * (merge.ts) stay as they are.
    */
   wrapup?: Wrapup | null;
+  /** Real-time. Every "Did I get this right?" card, oldest first. Absent in older files. */
+  recaps?: Recap[];
 
   // ---- preload ----------------------------------------------------------
   sources: Source[];
@@ -546,6 +584,11 @@ export function normaliseModel(raw: Partial<Model> & { sessionId?: string }): Mo
         }
       : null,
     outlines: raw.outlines ?? [],
+    recaps: (raw.recaps ?? []).map((r) => ({
+      ...r,
+      closedAt: r.closedAt ?? '',
+      lines: (r.lines ?? []).map((l) => ({ ...l, conceptIds: l.conceptIds ?? [], verdict: l.verdict ?? '', correction: l.correction ?? '' })),
+    })),
   };
 }
 

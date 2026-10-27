@@ -23,6 +23,7 @@ import ConceptEdge from './ConceptEdge';
 import QuestionNode from './QuestionNode';
 import { useSession } from '@/lib/store';
 import { cardQuestions, parkedCountByAnchor, visibleConcepts, visibleRelationships } from '@/lib/reducer';
+import { foldedDetails, replayAt, turnChanges } from '@/lib/understanding';
 import { KIND_DEFAULT_SIZE, type NodeSize } from '@/lib/layout';
 import { mapToPng } from '@/lib/snapshot';
 
@@ -52,6 +53,8 @@ const QUESTION_COLOR = '#7c3aed';
 const BANDED = new Set(['QUESTION', 'PROBLEM']);
 /** How long a concept found from the open questions panel stays highlighted. */
 const HIGHLIGHT_MS = 2000;
+/** KVIF P5. How long the rest of the map steps back after a turn, so the new boxes stand out. */
+const FLASH_MS = 5000;
 
 const LAYOUT_MS = 400;
 /* Past this many nodes the tween costs more than it explains, so it is dropped. */
@@ -76,6 +79,11 @@ function Flow() {
   const showLinks = useSession((s) => s.showLinks);
   const focusConceptId = useSession((s) => s.focusConceptId);
   const clearFocus = useSession((s) => s.clearFocus);
+  const foldOn = useSession((s) => s.foldDetails);
+  const selectedId = useSession((s) => s.selectedConceptId);
+  const select = useSession((s) => s.select);
+  const replayTurn = useSession((s) => s.replayTurn);
+  const setReplay = useSession((s) => s.setReplay);
   const { getNodes, getNodesBounds, fitView, getNode, setCenter, getZoom } = useReactFlow();
   const [highlight, setHighlight] = useState('');
   const highlightTimer = useRef<number | undefined>(undefined);
@@ -104,10 +112,53 @@ function Flow() {
   /** The topology the current positions were computed for. */
   const laidOutFor = useRef('');
 
-  const concepts = visibleConcepts(model);
-  const relationships = visibleRelationships(model);
+  /*
+   * KVIF P1, P6: preserve more than you display. Green details whose only
+   * link is their owner sit inside it as chips (foldedDetails). They stay in
+   * the model and in every export; they just take no box of their own.
+   */
+  const fold = useMemo(
+    () => (foldOn ? foldedDetails(model) : { folded: new Set<string>(), byOwner: new Map() }),
+    [model, foldOn]
+  );
+  const concepts = visibleConcepts(model).filter((c) => !fold.folded.has(c.id));
+  const relationships = visibleRelationships(model).filter((r) => !fold.folded.has(r.from) && !fold.folded.has(r.to));
 
-  const cards = cardQuestions(model);
+  /* KVIF P5. What this turn added or touched, and a few seconds in which the rest steps back. */
+  const changed = useMemo(() => turnChanges(model), [model]);
+  const [flash, setFlash] = useState(false);
+  const flashedTurn = useRef(model.turn);
+  const flashTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (model.turn === flashedTurn.current) return;
+    // Only an ordinary next turn. Opening or restoring a session jumps several
+    // turns at once, and nothing in it is new to the person.
+    const step = model.turn === flashedTurn.current + 1;
+    flashedTurn.current = model.turn;
+    if (!step || changed.size === 0) return;
+    setFlash(true);
+    // A ref, not a cleanup: the model changes on every layout frame, and a
+    // cleanup would cancel the timer before it fires.
+    window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlash(false), FLASH_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model.turn]);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
+
+  /* KVIF P11. The history slider: the map as it stood after an earlier turn. */
+  const replaying = replayTurn !== null && replayTurn < model.turn;
+  const frame = useMemo(() => (replaying ? replayAt(model, replayTurn!) : null), [model, replaying, replayTurn]);
+  // A new turn ends the replay: the map is live again.
+  const liveTurn = useRef(model.turn);
+  useEffect(() => {
+    if (model.turn !== liveTurn.current) {
+      liveTurn.current = model.turn;
+      if (replayTurn !== null) setReplay(null);
+    }
+  }, [model.turn, replayTurn, setReplay]);
+
+  // Question cards are the present, not the history: off while replaying.
+  const cards = replaying ? [] : cardQuestions(model);
   const waiting = parkedCountByAnchor(model);
 
   /*
@@ -135,7 +186,7 @@ function Flow() {
       '|' +
       relationships.map((r) => `${r.id}:${r.status}:${r.label}`).join(','),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [model]
+    [model, fold]
   );
 
   /*
@@ -152,23 +203,35 @@ function Flow() {
    */
   const conceptNodes: Node[] = useMemo(
     () =>
-      concepts.map((c) => ({
-        id: c.id,
-        type: 'concept',
-        position: { x: c.x, y: c.y },
-        className: highlight === c.id ? 'node-focus' : undefined,
-        measured: measured.get(c.id),
-        data: {
-          label: c.label,
-          note: c.note,
-          status: c.status,
-          origin: c.origin,
-          kind: c.kind,
-          parkedQuestions: waiting.get(c.id) ?? 0,
-        },
-      })),
+      concepts.map((c) => {
+        const then = frame ? frame.concepts.get(c.id) : c.status;
+        const classes = [
+          highlight === c.id ? 'node-focus' : '',
+          selectedId === c.id ? 'node-picked' : '',
+          !frame && changed.has(c.id) ? 'node-new' : '',
+          frame && !then ? 'node-future' : '',
+        ].filter(Boolean);
+        return {
+          id: c.id,
+          type: 'concept',
+          position: { x: c.x, y: c.y },
+          className: classes.length ? classes.join(' ') : undefined,
+          measured: measured.get(c.id),
+          data: {
+            label: c.label,
+            note: c.note,
+            status: then ?? c.status,
+            origin: c.origin,
+            kind: c.kind,
+            parkedQuestions: frame ? 0 : waiting.get(c.id) ?? 0,
+            details: (fold.byOwner.get(c.id) ?? [])
+              .filter((x: { id: string }) => !frame || frame.concepts.has(x.id))
+              .map((x: { id: string; label: string; note: string }) => ({ id: x.id, label: x.label, note: x.note })),
+          },
+        };
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [model, highlight, sizesKey]
+    [model, highlight, sizesKey, fold, selectedId, changed, frame]
   );
 
   const cardNodes: Node[] = useMemo(
@@ -199,8 +262,11 @@ function Flow() {
   const edges: Edge[] = useMemo(
     () =>
       relationships.map((r) => {
-        const proposed = r.status === 'PROPOSED';
+        const then = frame ? frame.relationships.get(r.id) : r.status;
+        const proposed = (then ?? r.status) === 'PROPOSED';
+        const future = Boolean(frame && !then);
         return {
+          className: future ? 'edge-future' : undefined,
           id: r.id,
           source: r.from,
           target: r.to,
@@ -217,7 +283,7 @@ function Flow() {
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [topology]
+    [topology, frame]
   );
 
   // RT-US-06. A dashed line from the concept a question is about to its card.
@@ -287,10 +353,10 @@ function Flow() {
   // Fall back to the CSS default (layout.ts) for anything not painted yet.
   const runLayout = useCallback(
     async (ms: number, fit: boolean) => {
-      await layoutTo(measuredSizes(), ms);
+      await layoutTo(measuredSizes(), ms, fold.folded);
       if (fit) fitView({ padding: 0.25, maxZoom: 0.85, duration: 320 });
     },
-    [measuredSizes, layoutTo, fitView]
+    [measuredSizes, layoutTo, fitView, fold]
   );
 
   /*
@@ -364,6 +430,12 @@ function Flow() {
       edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}
       onMoveEnd={onMoveEnd}
+      // KVIF P9. A click on a box shows where it came from; a click on empty space closes it.
+      onNodeClick={(_, node) => {
+        if (node.type === 'concept') select(node.id);
+      }}
+      onPaneClick={() => select('')}
+      className={[flash && !frame ? 'turn-flash' : '', frame ? 'replaying' : ''].filter(Boolean).join(' ')}
       fitView
       fitViewOptions={{ padding: 0.45, maxZoom: 0.85 }}
       minZoom={0.15}
@@ -390,6 +462,14 @@ function Flow() {
           title="Save the whole map as a PNG picture"
         >
           Picture
+        </button>
+        <button
+          className={`btn-tidy${replayTurn !== null ? ' btn-on' : ''}`}
+          onClick={() => setReplay(replayTurn === null ? Math.max(1, model.turn - 1) : null)}
+          disabled={model.turn < 2}
+          title="Replay how the map grew, turn by turn"
+        >
+          History
         </button>
       </Panel>
     </ReactFlow>

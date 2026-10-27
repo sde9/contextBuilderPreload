@@ -6,7 +6,7 @@
  * back to the wording that produced it.
  */
 
-export const PROMPT_VERSION = 'p7-2026-10-27';
+export const PROMPT_VERSION = 'p8-2026-10-27';
 
 const KIND_VOCAB = `
 KIND. Seven values, and they classify the ROLE a thing plays in the
@@ -681,4 +681,59 @@ export function outlineUser(input: {
   ]
     .filter((line, i, all) => line !== '' || all[i - 1] !== '')
     .join('\n');
+}
+
+// ---------------------------------------------------------------- read-back
+
+/*
+ * KVIF P7, grounding. Every few turns, the live session reads the map back to
+ * the person in a few plain lines and asks "Did I get this right?". A yes
+ * confirms the guesses a line rests on; a correction is sent as an ordinary
+ * turn. Text only: this call cannot add anything to the map.
+ */
+export const RECAP_SYSTEM = `
+You read a live map back to the person, so they can tell you whether you
+understood them. Write up to 4 short lines, in their own words, about what
+matters most for their goal.
+
+Each line is one sentence a person could answer with "yes" or "not quite".
+Name the ids of the concepts each line rests on in conceptIds.
+
+Cover what is most useful to check, not everything. Include the guesses
+(items marked [PROPOSED]) that matter most for the goal: those are the ones
+worth a yes or no. When something important is still unknown, one line may
+say so, with kind OPEN.
+
+kind is CONFIRMED only when every concept a line rests on is [VALIDATED].
+A line that rests on any [PROPOSED] item is a GUESS. Never word a guess as
+if it were settled.
+
+Do not add anything that is not on the map or in the conversation.
+`.trim();
+
+export function recapUser(payload: {
+  goal: string;
+  conversation: string[];
+  omittedStatements: number;
+  concepts: { id: string; label: string; note: string; status: string; kind: string }[];
+  relationships: { from: string; to: string; label: string; status: string }[];
+  openQuestions: string[];
+}): string {
+  const lines = (items: string[]) => (items.length ? items.map((s) => `  ${s}`).join('\n') : '  (none)');
+  return [
+    `GOAL OF THIS SESSION: ${payload.goal.trim() || '(not set)'}`,
+    ``,
+    `CURRENT MAP`,
+    lines(payload.concepts.map((c) => `${c.id}  [${c.status}] ${c.label}${c.note ? ` (${c.note})` : ''}`)),
+    ``,
+    `RELATIONSHIPS`,
+    lines(payload.relationships.map((r) => `${r.from} --${r.label}--> ${r.to}${r.status === 'PROPOSED' ? ' [PROPOSED]' : ''}`)),
+    ``,
+    `OPEN QUESTIONS`,
+    lines(payload.openQuestions.map((q) => `- ${q}`)),
+    ``,
+    `WHAT WAS SAID, oldest first`,
+    ...(payload.omittedStatements ? [`  (${payload.omittedStatements} earlier statements left out for length)`] : []),
+    lines(payload.conversation),
+  ].join('\n');
 }

@@ -752,3 +752,97 @@ button.primary:hover:not(:disabled) { background: #1e293b; }
   .steps { gap: 10px; font-size: 12px; }
   .modal-head, .modal-body, .modal-foot { padding-left: 16px; padding-right: 16px; }
 }
+
+/* ================================================================ KVIF: understanding the live map */
+
+/* ---------------------------------------------------------------- P5: this turn stands out */
+
+.react-flow__node.node-new .node { box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.35), 0 6px 18px rgba(21, 128, 61, 0.18); }
+.react-flow__node.node-new .node-proposed { box-shadow: 0 0 0 3px rgba(234, 115, 23, 0.35), 0 6px 18px rgba(234, 115, 23, 0.18); }
+.react-flow__node.node-new .node::after {
+  content: 'new'; position: absolute; top: -9px; right: 10px;
+  padding: 0 6px; border-radius: 99px; background: var(--ink); color: #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 16px; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.react-flow__node { transition: opacity 0.6s ease; }
+.turn-flash .react-flow__node-concept:not(.node-new) { opacity: 0.4; }
+.turn-flash .react-flow__edge { opacity: 0.35; transition: opacity 0.6s ease; }
+@media (prefers-reduced-motion: reduce) { .react-flow__node, .turn-flash .react-flow__edge { transition: none; } }
+
+/* ---------------------------------------------------------------- P6: details folded into chips */
+
+.node-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; max-width: 260px; }
+.chip {
+  padding: 1px 8px; border-radius: 99px; font-size: 11px; line-height: 18px;
+  border: 1px solid #bbf7d0; background: #fff; color: var(--green-ink); cursor: pointer;
+}
+.chip:hover:not(:disabled) { background: var(--green-bg); border-color: var(--green); }
+
+/* ---------------------------------------------------------------- P9: the picked box, and its source */
+
+.react-flow__node.node-picked .node { outline: 3px solid var(--ink); outline-offset: 3px; }
+.react-flow__node-concept { cursor: pointer; }
+
+.source-panel { display: flex; flex-direction: column; gap: 12px; }
+.source-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.source-kind { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+.source-title { margin: 2px 0 0; font-size: 18px; line-height: 1.3; }
+.source-close { padding: 0 8px; font-size: 18px; line-height: 26px; border: 0; background: none; color: var(--muted); }
+.source-status { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.dot-green { background: var(--green); }
+.dot-orange { background: var(--orange); border: 2px dashed #fff; box-shadow: 0 0 0 1px var(--orange); }
+.dot-red { background: var(--problem); }
+.source-note { margin: 0; font-size: 13.5px; line-height: 1.45; }
+.source-actions { display: flex; gap: 8px; }
+.source-section h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.source-quotes, .source-list, .source-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 1.45; }
+.source-quotes blockquote { margin: 2px 0 0; padding: 6px 10px; border-left: 3px solid var(--green); background: var(--green-bg); border-radius: 0 6px 6px 0; }
+.quote-meta { font-size: 11px; color: var(--muted); font-weight: 600; }
+.source-empty, .source-why { margin: 0; font-size: 13px; line-height: 1.45; }
+.source-why { margin-top: 6px; padding: 6px 10px; border-left: 3px dashed var(--orange); background: var(--orange-bg); border-radius: 0 6px 6px 0; }
+.source-muted { color: var(--muted); }
+.source-guessed { color: var(--orange-ink); }
+.source-show { align-self: flex-start; }
+
+/* ---------------------------------------------------------------- P7: did I get this right? */
+
+.side { flex: 0 0 320px; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; border-left: 1px solid var(--line); background: var(--panel); }
+.side > .clarify-panel { flex: 0 0 auto; border-left: 0; overflow: visible; }
+.recap-card {
+  margin: 12px 12px 0; padding: 12px 14px;
+  background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--question);
+  border-radius: 12px; box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+}
+.recap-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+.recap-wait { margin: 8px 0 2px; font-size: 13px; color: var(--muted); }
+.recap-lines { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.recap-line { font-size: 13.5px; line-height: 1.45; }
+.recap-done { opacity: 0.65; }
+.recap-tag { display: inline-block; padding: 0 6px; border-radius: 99px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; vertical-align: 1px; }
+.tag-green { background: var(--green-bg); color: var(--green-ink); border: 1px solid #bbf7d0; }
+.tag-orange { background: var(--orange-bg); color: var(--orange-ink); border: 1px dashed var(--orange); }
+.tag-question { background: #f5f3ff; color: var(--question); border: 1px solid #ddd6fe; }
+.recap-buttons, .recap-fix { display: flex; gap: 6px; margin-top: 6px; }
+.recap-buttons button, .recap-fix button { padding: 3px 10px; font-size: 12px; }
+.recap-fix input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
+.recap-verdict { margin-top: 4px; font-size: 12px; color: var(--muted); }
+
+/* ---------------------------------------------------------------- P11: history */
+
+.btn-on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn-on:hover:not(:disabled) { background: #1e293b; }
+.history-bar {
+  position: absolute; left: 50%; bottom: 14px; z-index: 6; transform: translateX(-50%);
+  width: min(720px, calc(100% - 28px));
+  background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14); padding: 10px 14px;
+}
+.history-row { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.history-row input[type=range] { flex: 1 1 auto; accent-color: var(--ink); }
+.history-count { color: var(--muted); white-space: nowrap; }
+.history-said { margin-top: 6px; max-height: 64px; overflow-y: auto; font-size: 13px; line-height: 1.45; }
+.history-said p { margin: 2px 0; }
+.react-flow__node.node-future { opacity: 0.18; filter: grayscale(1); pointer-events: none !important; }
+.react-flow__edge.edge-future { opacity: 0.12; }
+.replaying .node-actions { display: none; }

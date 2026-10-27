@@ -6,8 +6,13 @@ import { addBlocks, emptyModel, newId, noBlocks } from './types';
 import {
   answerPayload,
   applyAnswer,
+  addRecap,
   applyAutoLayout,
   applyExtract,
+  closeRecap,
+  groundRecapLine,
+  recapDue,
+  recapPayload,
   applyFinishReview,
   applyPropose,
   confirmConcept,
@@ -25,7 +30,7 @@ import {
   setGoal,
   withCallMeta,
 } from './reducer';
-import { AnswerPatch, ExtractPatchRT, ProposePatchRT, WrapupPatch } from './schema';
+import { AnswerPatch, ExtractPatchRT, ProposePatchRT, RecapPatch, WrapupPatch } from './schema';
 import type { NodeSize } from './layout';
 import { toDrawioXml, toMermaid } from './export';
 import { saveDataUrl, saveText } from './download';
@@ -73,8 +78,8 @@ type State = {
   rejectRelationship: (id: string) => void;
   move: (id: string, x: number, y: number) => void;
   autoLayout: (sizes?: Record<string, NodeSize>) => void;
-  /** Same layout, animated. Resolves once every node has landed. */
-  layoutTo: (sizes?: Record<string, NodeSize>, ms?: number) => Promise<void>;
+  /** Same layout, animated. Resolves once every node has landed. `skip`: concepts drawn inside another box. */
+  layoutTo: (sizes?: Record<string, NodeSize>, ms?: number, skip?: Set<string>) => Promise<void>;
   /** Close a question for good: a list item or a box, on the map or put off for later. */
   dismiss: (id: string) => void;
   /** Put a question off for later, and bring it back. */
@@ -82,6 +87,21 @@ type State = {
   back: (id: string) => void;
   toggleSuggestions: () => void;
   toggleAutoTidy: () => void;
+
+  /** KVIF P2, P9. The box whose source is shown on the right. '' when none. */
+  selectedConceptId: string;
+  select: (id: string) => void;
+  /** KVIF P5, P6. On: green details sit inside their owner as chips. */
+  foldDetails: boolean;
+  toggleFold: () => void;
+  /** KVIF P11. The turn the history slider shows, or null when it is off. */
+  replayTurn: number | null;
+  setReplay: (turn: number | null) => void;
+  /** KVIF P7. "Did I get this right?" */
+  recapPhase: 'idle' | 'loading';
+  requestRecap: () => Promise<void>;
+  answerRecap: (recapId: string, index: number, verdict: 'RIGHT' | 'WRONG', correction?: string) => Promise<void>;
+  dismissRecap: (recapId: string) => void;
 
   /** RT-US-19. Off hides the links on screen; layout and the file keep them. */
   showLinks: boolean;
@@ -181,6 +201,10 @@ export const useSession = create<State>((set, get) => {
   lastMs: { extract: 0, propose: 0 },
   blocked: noBlocks(),
   capture: null,
+  selectedConceptId: '',
+  foldDetails: true,
+  replayTurn: null,
+  recapPhase: 'idle',
   showLinks: true,
   focusConceptId: '',
   finishOpen: false,
@@ -200,7 +224,8 @@ export const useSession = create<State>((set, get) => {
     const trimmed = text.trim();
     if (!trimmed || get().phase !== 'idle') return;
 
-    set({ phase: 'reading', pending: trimmed, error: '' });
+    // A new turn is the present: the history slider closes.
+    set({ phase: 'reading', pending: trimmed, error: '', replayTurn: null });
 
     // ---- Phase 1: what was said
     let afterExtract: Model;
@@ -238,6 +263,8 @@ export const useSession = create<State>((set, get) => {
     }
 
     await proposeAfter(afterExtract, trimmed);
+    // KVIF P7. Every few turns, read the map back and ask whether it is right.
+    if (get().suggestions && recapDue(get().model)) void get().requestRecap();
   },
 
   answerQuestion: async (questionId, text) => {
@@ -305,14 +332,14 @@ export const useSession = create<State>((set, get) => {
    * Targets are captured once, up front. If a node arrives mid-flight it is
    * simply left where placement put it and picked up by the next layout.
    */
-  layoutTo: (sizes, ms = 400) => {
+  layoutTo: (sizes, ms = 400, skip) => {
     if (frame !== null) {
       cancelAnimationFrame(frame);
       frame = null;
     }
 
     const start = new Map(get().model.concepts.map((c) => [c.id, { x: c.x, y: c.y }]));
-    const target = applyAutoLayout(get().model, sizes);
+    const target = applyAutoLayout(get().model, sizes, skip);
     const end = new Map(target.concepts.map((c) => [c.id, { x: c.x, y: c.y }]));
 
     const settle = () =>
@@ -374,6 +401,39 @@ export const useSession = create<State>((set, get) => {
   toggleSuggestions: () => set((s) => ({ suggestions: !s.suggestions })),
   toggleAutoTidy: () => set((s) => ({ autoTidy: !s.autoTidy })),
   toggleLinks: () => set((s) => ({ showLinks: !s.showLinks })),
+  select: (id) => set({ selectedConceptId: id }),
+  toggleFold: () => set((s) => ({ foldDetails: !s.foldDetails })),
+  setReplay: (turn) => set({ replayTurn: turn }),
+
+  requestRecap: async () => {
+    if (get().recapPhase !== 'idle') return;
+    set({ recapPhase: 'loading' });
+    try {
+      const res = await fetch('/api/recap', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(recapPayload(get().model)),
+      });
+      const body = await res.json();
+      if (res.ok && body.patch) {
+        const patch = RecapPatch.parse(body.patch);
+        set((s) => ({ model: withCallMeta(addRecap(s.model, patch.lines), 'recap', metaOf(body)) }));
+      }
+    } catch {
+      // No card this time. A missing read-back is invisible; an error in the middle of a meeting is not.
+    } finally {
+      set({ recapPhase: 'idle' });
+    }
+  },
+
+  answerRecap: async (recapId, index, verdict, correction = '') => {
+    set((s) => ({ model: groundRecapLine(s.model, recapId, index, verdict, correction) }));
+    // A correction is something the person said: it goes through the
+    // ordinary turn, so it lands green from their own words.
+    if (verdict === 'WRONG' && correction.trim()) await get().submit(correction.trim());
+  },
+
+  dismissRecap: (recapId) => set((s) => ({ model: closeRecap(s.model, recapId) })),
   focusConcept: (id) => set({ focusConceptId: id }),
   clearFocus: () => set({ focusConceptId: '' }),
 
@@ -432,6 +492,8 @@ export const useSession = create<State>((set, get) => {
       finishOpen: false,
       topicsPhase: 'idle',
       focusConceptId: '',
+      selectedConceptId: '',
+      replayTurn: null,
     });
   },
 
@@ -440,12 +502,31 @@ export const useSession = create<State>((set, get) => {
   // RT-US-11. Sessions from before Release 2 keep their questions as boxes;
   // they come back as question cards like everything else.
   restore: (model) =>
-    set({ model: migrateQuestionConcepts(model), phase: 'idle', pending: '', error: '', blocked: noBlocks(), topicsPhase: 'idle' }),
+    set({
+      model: migrateQuestionConcepts(model),
+      phase: 'idle',
+      pending: '',
+      error: '',
+      blocked: noBlocks(),
+      topicsPhase: 'idle',
+      selectedConceptId: '',
+      replayTurn: null,
+    }),
 
   openFile: async (file) => {
     try {
       const model = migrateQuestionConcepts(parseSessionFile(await file.text()));
-      set({ model, phase: 'idle', pending: '', error: '', blocked: noBlocks(), topicsPhase: 'idle', finishOpen: false });
+      set({
+        model,
+        phase: 'idle',
+        pending: '',
+        error: '',
+        blocked: noBlocks(),
+        topicsPhase: 'idle',
+        finishOpen: false,
+        selectedConceptId: '',
+        replayTurn: null,
+      });
     } catch (e) {
       set({ error: (e as Error).message });
     }

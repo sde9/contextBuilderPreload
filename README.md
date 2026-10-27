@@ -120,6 +120,27 @@ Since 27 Oct the live session keeps its questions as records, drawn as cards
 
 ---
 
+## Real-time: understanding the map (KVIF, 27 Oct 2026)
+
+Four changes from the *Knowledge Visualisation Interaction Framework* (Enabler
+Research, Aug 2026). Principle numbers (P1 to P13) refer to its section 14.
+Real-time only; Preload is unchanged.
+
+| What changed for the user | KVIF | Where |
+|---|---|---|
+| **Where did this come from?** A click on a box opens it on the right: the person's exact words and the turn, or, for a guess, that nobody said it yet, what it was guessed from and why. Then what happened to it: said out loud, confirmed, changed by an answer, checked in a read-back. Its details, links and questions, all clickable. A click on empty space closes it | P2, P3, P9 | `conceptLineage` in `lib/understanding.ts`, `SourcePanel.tsx` |
+| **What is new.** After each turn the boxes that turn added or touched carry a NEW tag, and for 5 seconds the rest of the map steps back. Opening or restoring a session does not count as new | P5 | `turnChanges`, `Canvas.tsx` |
+| **Fold details.** A confirmed detail whose only link is its owner sits inside it as a small chip. A click on the chip shows its source. Guesses and details linked to anything else stay boxes. **Fold details** in the header turns it off. Nothing is removed: exports and the file keep every concept | P1, P5, P6 | `foldedDetails`, chips in `ConceptNode`, `applyAutoLayout(skip)` |
+| **Did I get this right?** Every 4 turns (or with **Recap**) the map is read back in up to 4 lines, each tagged said, guess or open. The tag comes from the map, not from the AI: a line resting on a guess is always a guess. **Right** confirms the guesses it rests on. **Not quite** asks what is right and sends it as an ordinary turn, so it lands green from the person's words | P3, P7 | `addRecap`, `groundRecapLine`, `app/api/recap`, `RECAP_SYSTEM`, `RecapCard.tsx` |
+| **History.** A slider over the turns. The map shows what existed after that turn, in the colours it had then; what came later is a pale outline in its place. Under it, what was said at that turn. Arrow keys step, a new turn ends it | P11 | `replayAt`, `HistoryBar.tsx`, `Concept.bornTurn` |
+
+Not done, on purpose: choosing the kind of diagram by task (P4) and modes per
+role (KVIF 3.2). Both need the interviews first.
+
+`PROMPT_VERSION` is `p8-2026-10-27`. `smoke` has 42 more checks (218 in all).
+
+---
+
 ## Real-time, Releases 2 to 4 (27 Oct 2026)
 
 Story IDs refer to *CB Real-time Refinements v0.1*. Preload is unchanged: every

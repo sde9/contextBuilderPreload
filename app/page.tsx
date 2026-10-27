@@ -6,11 +6,14 @@ import Canvas from '@/components/Canvas';
 import Composer from '@/components/Composer';
 import OpenQuestionsPanel from '@/components/OpenQuestionsPanel';
 import FinishPanel from '@/components/FinishPanel';
+import SourcePanel from '@/components/SourcePanel';
+import RecapCard from '@/components/RecapCard';
+import HistoryBar from '@/components/HistoryBar';
 import GoalBadge from '@/components/GoalBadge';
 import GoalStart from '@/components/GoalStart';
 import RestoreBar from '@/components/RestoreBar';
 import { useSession } from '@/lib/store';
-import { visibleConcepts } from '@/lib/reducer';
+import { laterQuestions, openRecap, visibleConcepts } from '@/lib/reducer';
 import { saveSession } from '@/lib/persist';
 import ShapeLegend, { LIVE_SHAPES } from '@/components/ShapeLegend';
 
@@ -49,6 +52,13 @@ export default function Page() {
   const showLinks = useSession((s) => s.showLinks);
   const toggleLinks = useSession((s) => s.toggleLinks);
   const openFinish = useSession((s) => s.openFinish);
+  const foldDetails = useSession((s) => s.foldDetails);
+  const toggleFold = useSession((s) => s.toggleFold);
+  const requestRecap = useSession((s) => s.requestRecap);
+  const recapBusy = useSession((s) => s.recapPhase !== 'idle' || s.phase !== 'idle');
+  const selected = useSession((s) => s.selectedConceptId);
+  const hasRecap = useSession((s) => Boolean(openRecap(s.model)) || s.recapPhase === 'loading');
+  const hasWaiting = useSession((s) => laterQuestions(s.model).length > 0);
   const lastMs = useSession((s) => s.lastMs);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -128,6 +138,15 @@ export default function Page() {
             <input type="checkbox" checked={showLinks} onChange={toggleLinks} />
             Links
           </label>
+          {/* KVIF P5, P6. Green details sit inside their box as small chips; off draws each as a box. */}
+          <label className="toggle" title="Fold confirmed details into their box as small chips">
+            <input type="checkbox" checked={foldDetails} onChange={toggleFold} />
+            Fold details
+          </label>
+          {/* KVIF P7. The read-back also comes by itself every few turns. */}
+          <button onClick={() => void requestRecap()} disabled={!started || recapBusy} title="Read the map back: did I get this right?">
+            Recap
+          </button>
           <button className="btn-finish" onClick={openFinish} disabled={!started} title="Review open questions, get topics for next time and a report">
             Finish
           </button>
@@ -193,8 +212,15 @@ export default function Page() {
             </div>
           )}
           <Canvas />
+          <HistoryBar />
         </section>
-        <OpenQuestionsPanel />
+        {/* The right column: the read-back on top, then the source of the picked box, or the open questions. */}
+        {(selected || hasRecap || hasWaiting) && (
+          <div className="side">
+            <RecapCard />
+            {selected ? <SourcePanel /> : <OpenQuestionsPanel />}
+          </div>
+        )}
       </div>
 
       <FinishPanel />
@@ -203,7 +229,8 @@ export default function Page() {
         <div className="legend">
           <span className="k-green">■</span> said &nbsp;
           <span className="k-orange">■</span> a guess: confirm or reject &nbsp;
-          <span className="k-question">■</span> a question: answer it, put it off with Later, or dismiss it
+          <span className="k-question">■</span> a question: answer it, put it off with Later, or dismiss it &nbsp;·
+          click a box to see where it came from
         </div>
         <ShapeLegend kinds={LIVE_SHAPES} sizeNote={false} />
         <Composer />

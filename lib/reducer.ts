@@ -1,4 +1,4 @@
-import type { Blocked, CallMeta, Concept, Excerpt, Kind, LogEntry, Model, Question, Relationship, Statement } from './types';
+import type { Blocked, CallMeta, Concept, Excerpt, Kind, LogEntry, Model, Question, Recap, RecapKind, Relationship, Statement } from './types';
 import { conceptDefaults, newId, noBlocks, questionState } from './types';
 import type { AnswerPatch, ExtractPatch, ExtractPatchPL, ExtractPatchRT, ProposePatch, ProposePatchRT } from './schema';
 import type { AnswerInput } from './prompts';
@@ -155,6 +155,7 @@ export function applyExtract(
       level: 0,
       evidence: [statement.id],
       turn,
+      bornTurn: turn,
       x: 0,
       y: 0,
       pinned: false,
@@ -461,6 +462,7 @@ export function applyPropose(
       level: 0,
       evidence: [],
       turn,
+      bornTurn: turn,
       x: p.x,
       y: p.y,
       pinned: false,
@@ -731,9 +733,11 @@ export function rejectRelationship(model: Model, relationshipId: string): Model 
  * visible node at once and is the only thing in the app allowed to do so.
  * Repositioning is itself a decision, so nodes come out unpinned.
  */
-export function applyAutoLayout(model: Model, sizes: Record<string, NodeSize> = {}): Model {
-  const concepts = visibleConcepts(model);
-  const relationships = visibleRelationships(model);
+export function applyAutoLayout(model: Model, sizes: Record<string, NodeSize> = {}, skip: Set<string> = new Set()): Model {
+  // skip: concepts drawn inside another box (folded details). They take no
+  // place of their own, so dagre must not reserve one.
+  const concepts = visibleConcepts(model).filter((c) => !skip.has(c.id));
+  const relationships = visibleRelationships(model).filter((r) => !skip.has(r.from) && !skip.has(r.to));
   const points = new Map(layoutLeftToRight(concepts, relationships, sizes).map((p) => [p.id, p]));
 
   return {
@@ -987,6 +991,123 @@ export function migrateQuestionConcepts(model: Model, at = new Date().toISOStrin
           { turn: model.turn, at, kind: 'question' as const, payload: { action: 'migrate', questionIds: boxes.map((c) => c.id) } },
         ]
       : model.log,
+  };
+}
+
+// ------------------------------------------------------------------ live: "Did I get this right?" (KVIF P7)
+
+/** Most lines on one read-back card. */
+export const RECAP_LINES = 4;
+/** Turns between read-backs offered without being asked. */
+export const RECAP_EVERY = 4;
+
+export type RecapLineIn = { text: string; kind: RecapKind; conceptIds: string[] };
+
+/**
+ * Add a read-back card. The AI words the lines; the map decides how sure each
+ * one is (KVIF P3, rendered confidence never above the evidence): a line that
+ * rests on any guess is a GUESS, a line that names nothing on the map cannot
+ * be called confirmed, and only lines the AI marked OPEN are open questions.
+ * Ids that are not on the map are dropped.
+ */
+export function addRecap(model: Model, lines: RecapLineIn[], at = new Date().toISOString()): Model {
+  const onMap = new Map(visibleConcepts(model).map((c) => [c.id, c]));
+  const clean = lines
+    .map((l) => {
+      const conceptIds = [...new Set(l.conceptIds)].filter((id) => onMap.has(id));
+      const restsOnGuess = conceptIds.some((id) => onMap.get(id)!.status === 'PROPOSED');
+      const kind: RecapKind = l.kind === 'OPEN' ? 'OPEN' : restsOnGuess || conceptIds.length === 0 ? 'GUESS' : 'CONFIRMED';
+      return { text: l.text.replace(/\s+/g, ' ').trim(), kind, conceptIds, verdict: '' as const, correction: '' };
+    })
+    .filter((l) => l.text)
+    .slice(0, RECAP_LINES);
+  if (!clean.length) return model;
+  const recap: Recap = { id: newId('rc'), turn: model.turn, at, lines: clean, closedAt: '' };
+  // One card at a time: a new one closes any card still open.
+  const recaps = (model.recaps ?? []).map((r) => (r.closedAt ? r : { ...r, closedAt: at }));
+  return {
+    ...model,
+    recaps: [...recaps, recap],
+    log: [...model.log, { turn: model.turn, at, kind: 'recap' as const, payload: { recapId: recap.id, lines: clean } }],
+  };
+}
+
+/**
+ * The person answered one line. RIGHT confirms the guesses that line rests
+ * on: the person has just said they are right. WRONG keeps what they said
+ * instead; the store then sends those words as an ordinary turn, so what
+ * they state lands green the usual way and nothing here makes it up.
+ */
+export function groundRecapLine(
+  model: Model,
+  recapId: string,
+  index: number,
+  verdict: 'RIGHT' | 'WRONG',
+  correction = '',
+  at = new Date().toISOString()
+): Model {
+  const recap = (model.recaps ?? []).find((r) => r.id === recapId);
+  const line = recap?.lines[index];
+  if (!recap || !line || line.verdict) return model;
+  let m: Model = {
+    ...model,
+    recaps: (model.recaps ?? []).map((r) =>
+      r.id === recapId
+        ? { ...r, lines: r.lines.map((l, i) => (i === index ? { ...l, verdict, correction: correction.trim() } : l)) }
+        : r
+    ),
+  };
+  const confirmed: string[] = [];
+  if (verdict === 'RIGHT') {
+    for (const id of line.conceptIds) {
+      if (m.concepts.find((c) => c.id === id)?.status === 'PROPOSED') {
+        m = confirmConcept(m, id);
+        confirmed.push(id);
+      }
+    }
+  }
+  // Close the card once every line has an answer.
+  const after = m.recaps!.find((r) => r.id === recapId)!;
+  if (after.lines.every((l) => l.verdict)) {
+    m = { ...m, recaps: m.recaps!.map((r) => (r.id === recapId ? { ...r, closedAt: at } : r)) };
+  }
+  return {
+    ...m,
+    log: [
+      ...m.log,
+      { turn: m.turn, at, kind: 'ground' as const, payload: { recapId, index, verdict, conceptIds: line.conceptIds, confirmed, correction: correction.trim() } },
+    ],
+  };
+}
+
+export function closeRecap(model: Model, recapId: string, at = new Date().toISOString()): Model {
+  if (!(model.recaps ?? []).some((r) => r.id === recapId && !r.closedAt)) return model;
+  return { ...model, recaps: (model.recaps ?? []).map((r) => (r.id === recapId ? { ...r, closedAt: at } : r)) };
+}
+
+/** The card on screen, if any. */
+export function openRecap(m: Model): Recap | null {
+  return (m.recaps ?? []).find((r) => !r.closedAt) ?? null;
+}
+
+/** True when a read-back is due without being asked: every RECAP_EVERY turns, once there is enough to read back. */
+export function recapDue(m: Model, every = RECAP_EVERY): boolean {
+  if (openRecap(m)) return false;
+  if (visibleConcepts(m).length < 4) return false;
+  const last = (m.recaps ?? []).at(-1)?.turn ?? 0;
+  return m.turn - last >= every;
+}
+
+/** What the read-back call is given. */
+export function recapPayload(m: Model) {
+  const conversation = conversationWindow(m);
+  return {
+    goal: m.goal,
+    conversation: conversation.lines,
+    omittedStatements: conversation.omitted,
+    concepts: visibleConcepts(m).map((c) => ({ id: c.id, label: c.label, note: c.note, status: c.status, kind: c.kind })),
+    relationships: visibleRelationships(m).map((r) => ({ from: r.from, to: r.to, label: r.label, status: r.status })),
+    openQuestions: m.questions.filter((q) => q.status === 'OPEN' && !q.answeredAt).map((q) => q.text),
   };
 }
 

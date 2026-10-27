@@ -36,6 +36,8 @@ export type ConceptNodeData = {
   answerBusy?: boolean;
   /** Real-time only (RT-US-10). Questions about this concept waiting in the open questions panel. */
   parkedQuestions?: number;
+  /** Real-time only (KVIF P5, P6). Green details folded into this box as chips. */
+  details?: { id: string; label: string; note: string }[];
 };
 
 /*
@@ -127,6 +129,7 @@ export default function ConceptNode({ id, data }: NodeProps) {
   const laterLabel = d.laterLabel ?? 'Not now. Keep it in the Later list on the right';
   const answerBusy = d.onAnswer ? Boolean(d.answerBusy) : liveBusy;
   const shape = SHAPE_PATH[d.kind];
+  const selectLive = useSession((s) => s.select);
 
   const statusClass = contested ? 'node-contested' : proposed ? 'node-proposed' : 'node-validated';
   const classes = [
@@ -182,6 +185,25 @@ export default function ConceptNode({ id, data }: NodeProps) {
       </div>
 
       {d.note && <div className="node-note">{d.note}</div>}
+
+      {/* KVIF P1, P6: preserved and one click away, not drawn as boxes of their own. */}
+      {d.details && d.details.length > 0 && (
+        <div className="node-chips nodrag">
+          {d.details.map((x) => (
+            <button
+              key={x.id}
+              className="chip"
+              title={x.note ? `${x.label}: ${x.note}` : x.label}
+              onClick={(e) => {
+                e.stopPropagation();
+                selectLive(x.id);
+              }}
+            >
+              {x.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Always rendered, so a box keeps its size when the slider passes it;
           the stylesheet hides it on a step still to come. */}
